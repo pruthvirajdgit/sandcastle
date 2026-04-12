@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOTFS_DIR="${1:-/var/lib/sandcastle/rootfs}"
-EXECUTOR_BIN="${2:-$(dirname "$0")/../target/debug/sandcastle-executor}"
+EXECUTOR_BIN="${2:-$(dirname "$0")/../service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor}"
 
 echo "=== Sandcastle rootfs builder ==="
 echo "Rootfs dir: $ROOTFS_DIR"
@@ -19,8 +19,14 @@ echo "Executor binary: $EXECUTOR_BIN"
 
 if [ ! -f "$EXECUTOR_BIN" ]; then
     echo "ERROR: Executor binary not found at $EXECUTOR_BIN"
-    echo "Build it first: cargo build -p sandcastle-executor"
+    echo "Build it first: cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl"
     exit 1
+fi
+
+# Verify the binary is statically linked
+if ldd "$EXECUTOR_BIN" 2>&1 | grep -qv 'statically linked'; then
+    echo "WARNING: Executor binary is dynamically linked. It should be built with musl for container use."
+    echo "Build with: cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl"
 fi
 
 build_rootfs() {

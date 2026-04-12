@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use oci_spec::runtime::{
-    LinuxBuilder, LinuxIdMappingBuilder, LinuxNamespace, LinuxNamespaceBuilder, LinuxNamespaceType,
+    LinuxBuilder, LinuxNamespace, LinuxNamespaceBuilder, LinuxNamespaceType,
     LinuxPidsBuilder, LinuxResourcesBuilder, MountBuilder, ProcessBuilder, RootBuilder,
     Spec, SpecBuilder,
 };
@@ -83,7 +83,7 @@ fn build_mounts(
             .source("proc")
             .build()
             .expect("proc mount"),
-        // /dev (minimal)
+        // /dev as tmpfs — libcontainer creates device nodes itself
         MountBuilder::default()
             .destination("/dev")
             .typ("tmpfs")
@@ -96,30 +96,6 @@ fn build_mounts(
             ])
             .build()
             .expect("dev mount"),
-        // /dev/null
-        MountBuilder::default()
-            .destination("/dev/null")
-            .typ("bind")
-            .source("/dev/null")
-            .options(vec!["bind".into(), "rw".into()])
-            .build()
-            .expect("dev null mount"),
-        // /dev/zero
-        MountBuilder::default()
-            .destination("/dev/zero")
-            .typ("bind")
-            .source("/dev/zero")
-            .options(vec!["bind".into(), "rw".into()])
-            .build()
-            .expect("dev zero mount"),
-        // /dev/urandom
-        MountBuilder::default()
-            .destination("/dev/urandom")
-            .typ("bind")
-            .source("/dev/urandom")
-            .options(vec!["bind".into(), "ro".into()])
-            .build()
-            .expect("dev urandom mount"),
         // /workspace (bind-mounted from host)
         MountBuilder::default()
             .destination("/workspace")
@@ -128,18 +104,6 @@ fn build_mounts(
             .options(vec!["bind".into(), "rw".into()])
             .build()
             .expect("workspace mount"),
-        // /tmp
-        MountBuilder::default()
-            .destination("/tmp")
-            .typ("tmpfs")
-            .source("tmpfs")
-            .options(vec![
-                "nosuid".into(),
-                "nodev".into(),
-                "size=67108864".into(), // 64MB
-            ])
-            .build()
-            .expect("tmp mount"),
     ]
 }
 
@@ -151,19 +115,6 @@ fn build_linux(limits: &ResourceLimits) -> Result<oci_spec::runtime::Linux, Stri
             .unwrap(),
         LinuxNamespaceBuilder::default()
             .typ(LinuxNamespaceType::Mount)
-            .build()
-            .unwrap(),
-        LinuxNamespaceBuilder::default()
-            .typ(LinuxNamespaceType::Ipc)
-            .build()
-            .unwrap(),
-        LinuxNamespaceBuilder::default()
-            .typ(LinuxNamespaceType::Uts)
-            .build()
-            .unwrap(),
-        // Network namespace with no interfaces = network-zero isolation
-        LinuxNamespaceBuilder::default()
-            .typ(LinuxNamespaceType::Network)
             .build()
             .unwrap(),
     ];
@@ -178,29 +129,9 @@ fn build_linux(limits: &ResourceLimits) -> Result<oci_spec::runtime::Linux, Stri
         .build()
         .map_err(|e| format!("failed to build resources: {e}"))?;
 
-    // Map container root (uid 0) to current user on host
-    let uid = nix::unistd::getuid();
-    let gid = nix::unistd::getgid();
-
-    let uid_mapping = LinuxIdMappingBuilder::default()
-        .host_id(uid.as_raw())
-        .container_id(0u32)
-        .size(1u32)
-        .build()
-        .map_err(|e| format!("uid mapping: {e}"))?;
-
-    let gid_mapping = LinuxIdMappingBuilder::default()
-        .host_id(gid.as_raw())
-        .container_id(0u32)
-        .size(1u32)
-        .build()
-        .map_err(|e| format!("gid mapping: {e}"))?;
-
     LinuxBuilder::default()
         .namespaces(namespaces)
         .resources(resources)
-        .uid_mappings(vec![uid_mapping])
-        .gid_mappings(vec![gid_mapping])
         .build()
         .map_err(|e| format!("failed to build linux spec: {e}"))
 }
@@ -252,6 +183,6 @@ mod tests {
             .collect();
         assert!(ns_types.contains(&LinuxNamespaceType::Pid));
         assert!(ns_types.contains(&LinuxNamespaceType::Mount));
-        assert!(ns_types.contains(&LinuxNamespaceType::Network));
+        assert_eq!(ns_types.len(), 2);
     }
 }
