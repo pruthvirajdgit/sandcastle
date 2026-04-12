@@ -28,9 +28,9 @@ Central coordinator. Maintains three sandbox pools (one per isolation level) and
 ```rust
 trait SandboxBackend {
     async fn create(&self, config: SandboxConfig) -> Result<SandboxId>;
-    async fn execute(&self, id: &SandboxId, code: &str) -> Result<ExecutionResult>;
-    async fn upload_file(&self, id: &SandboxId, path: &str, content: &[u8]) -> Result<()>;
-    async fn download_file(&self, id: &SandboxId, path: &str) -> Result<Vec<u8>>;
+    async fn execute(&self, id: &SandboxId, code: &str, timeout: Duration) -> Result<ExecutionResult>;
+    async fn upload_file(&self, id: &SandboxId, host_path: &Path, sandbox_path: &str) -> Result<FileInfo>;
+    async fn download_file(&self, id: &SandboxId, sandbox_path: &str, host_path: &Path) -> Result<FileInfo>;
     async fn destroy(&self, id: &SandboxId) -> Result<()>;
 }
 ```
@@ -160,9 +160,11 @@ Agent → MCP → Sandbox Manager
 ```
 Agent → create_sandbox → Manager creates sandbox, returns sandbox_id
 Agent → execute_in_sandbox(sandbox_id, code1) → runs, returns result1
-Agent → upload_file(sandbox_id, "data.csv", ...) → injects file
-Agent → execute_in_sandbox(sandbox_id, code2) → runs (can read data.csv), returns result2
-Agent → download_file(sandbox_id, "output.json") → extracts file
+Agent → upload_file(sandbox_id, host_path="/data/input.csv", sandbox_path="input.csv")
+       → copies file from host into sandbox /workspace/input.csv
+Agent → execute_in_sandbox(sandbox_id, code2) → runs (can read input.csv), returns result2
+Agent → download_file(sandbox_id, sandbox_path="output.json")
+       → copies file from sandbox to host {output_dir}/{sandbox_id}/output.json
 Agent → destroy_sandbox(sandbox_id) → cleanup
 ```
 
@@ -258,6 +260,11 @@ timeout_seconds = 30
 memory_mb = 512
 cpu_cores = 1
 language = "python"
+
+[files]
+allowed_input_dirs = ["/data", "/tmp/sandcastle-input"]
+output_dir = "/tmp/sandcastle-output"
+max_file_size_bytes = 10485760    # 10 MB
 
 [pool.low]
 target_size = 20

@@ -145,9 +145,11 @@ This means even if the sandbox somehow creates a network interface, it can't int
 
 ### Working Directory
 - All user code executes in `/workspace`
-- File uploads go to `/workspace`
-- File downloads come from `/workspace`
+- File uploads are copied from host `allowed_input_dirs` into `/workspace`
+- File downloads are copied from `/workspace` to host `output_dir`
+- Host paths are validated: uploads only from allowlisted dirs, downloads only to designated output dir
 - Cannot write outside `/workspace` (enforced by executor, not just permissions)
+- File content never passes through MCP messages — only host paths are exchanged
 
 ## Resource Limits Enforcement
 
