@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sandcastle-server",
+    "crates/sandcastle-manager",
+    "crates/sandcastle-runtime",
+    "crates/sandcastle-executor",
+    "crates/sandcastle-process",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"

@@ -1,0 +1,9 @@
+[package]
+name = "sandcastle-executor"
+version = "0.1.0"
+edition = "2021"
+description = "In-sandbox executor binary for Sandcastle"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

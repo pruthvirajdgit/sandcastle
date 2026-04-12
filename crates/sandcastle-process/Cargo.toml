@@ -1,0 +1,16 @@
+[package]
+name = "sandcastle-process"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sandcastle-runtime = { path = "../sandcastle-runtime" }
+libcontainer = { version = "0.6.0", default-features = false, features = ["v2"] }
+oci-spec = { version = "0.9.0", features = ["runtime"] }
+nix = { version = "0.29", features = ["fs", "process", "signal"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

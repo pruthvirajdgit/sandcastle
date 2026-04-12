@@ -1,0 +1,11 @@
+[package]
+name = "sandcastle-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "SandboxRuntime trait and shared types for Sandcastle"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
