@@ -39,14 +39,20 @@ That's it. The agent doesn't know or care about VMs, containers, syscalls, or ne
 
 ## Key Differentiators
 
-### 1. MCP-Native
+### 1. MCP-Native — Sandboxing by Architecture, Not Discipline
+With SDK-based tools (E2B, Modal), the agent is a Python/Node process running on a host machine. It *can* run arbitrary code on the host — the sandbox is opt-in. A compromised agent, a prompt injection, or a developer mistake can bypass the sandbox entirely and execute code directly on the host.
+
+With MCP, the agent communicates via structured messages only. It has no runtime, no interpreter, no filesystem access on the host. Its **only** way to execute code is through the `execute_code` tool — which always runs in a sandbox. 100% of code execution is sandboxed by design, not by developer discipline.
+
 No SDK to install, no language-specific client. Any MCP-compatible agent connects instantly. As MCP becomes the standard protocol for AI tools, Sandcastle becomes the default sandbox.
 
 ### 2. Tiered Isolation
 No one-size-fits-all. Simple math? Use process isolation (5ms). Unknown code? Use gVisor (50ms). Potential malware? Use Firecracker (250ms). The agent chooses based on context.
 
-### 3. Self-Hostable
-Not cloud-only. Run Sandcastle on your own infrastructure — your code never leaves your network. Open-source core with optional managed service.
+### 3. Self-Hostable — Your Data Never Leaves Your Network
+Cloud-only sandboxes (E2B, Modal) require uploading your data to third-party infrastructure. For a data analysis use case, your CSV travels over the internet to their servers, gets processed, and results come back. This is a non-starter for privacy-sensitive data, regulated industries (healthcare, finance, government), or large files.
+
+Sandcastle runs on your own infrastructure. File injection is a local pipe/vsock write, not an HTTP upload. Your data never leaves your network. Open-source core with optional managed service for those who prefer hosted.
 
 ### 4. Network-Zero by Default
 Every competitor defaults to open network. Sandcastle defaults to **no network**. You explicitly allowlist domains. This is the right default for security.
@@ -130,10 +136,12 @@ Automated pipeline → agent generates and runs tests.
 | | Sandcastle | E2B | Modal | CodeSandbox | Docker |
 |---|---|---|---|---|---|
 | Primary use | AI agent sandbox | AI agent sandbox | ML compute | Browser IDE | General containers |
-| Protocol | MCP | REST SDK | Python SDK | REST API | Docker API |
-| Isolation | 3 tiers | Firecracker | gVisor | Container | Namespace |
+| Protocol | MCP-first | REST SDK + MCP | Python SDK | REST API | Docker API |
+| Sandbox by architecture | ✅ (MCP = only path) | ❌ (SDK = agent can bypass) | ❌ | ❌ | ❌ |
+| Isolation | 3 tiers | Firecracker only | gVisor only | Container | Namespace |
 | Self-host | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Network default | Blocked | Open | Open | Open | Open |
+| Data stays local | ✅ | ❌ (cloud only) | ❌ (cloud only) | ❌ | ✅ |
 | Open source | ✅ Full | Partial | ❌ | Partial | ✅ |
 | Pricing | Usage-based | Usage-based | Usage-based | Subscription | Free (self-host) |
 
