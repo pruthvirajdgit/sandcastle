@@ -1,17 +1,19 @@
-# Phase 1 — Product Goals
+# Phase 1 — Product Goals ✅ COMPLETE
 
 ## Objective
 
 Ship a working Sandcastle binary that an AI agent can use via MCP to execute code safely on a single machine. Phase 1 proves the core value proposition: **"plug in one MCP tool, get secure code execution."**
 
+**Status**: ✅ All success criteria met. Phase 1 shipped and verified end-to-end.
+
 ## Success Criteria
 
-1. An MCP client can connect via stdio, send `execute_code`, and get correct output back.
-2. Code runs in an isolated process — cannot access host filesystem, network, or other sandboxes.
-3. Resource limits (memory, CPU, timeout, PIDs) are enforced and kill runaway processes.
-4. File upload/download works via host paths with directory allowlisting.
-5. Multi-language: Python, JavaScript, and Bash all work.
-6. One-shot and session-based execution both work end-to-end.
+1. ✅ An MCP client can connect via stdio, send `execute_code`, and get correct output back.
+2. ✅ Code runs in an isolated process — cannot access host filesystem, network, or other sandboxes.
+3. ✅ Resource limits (memory, CPU, timeout, PIDs) are enforced and kill runaway processes.
+4. ✅ File upload/download works via host paths with directory allowlisting.
+5. ✅ Multi-language: Python, JavaScript, and Bash all work.
+6. ✅ One-shot and session-based execution both work end-to-end.
 
 ## What Ships
 
