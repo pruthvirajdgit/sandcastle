@@ -27,9 +27,10 @@ sandcastle/
 │       ├── sandcastle-executor/   # Binary that runs INSIDE the container
 │       ├── sandcastle-manager/    # Session lifecycle, file transfer
 │       ├── sandcastle-process/    # Linux container backend (libcontainer)
+│       ├── sandcastle-gvisor/     # gVisor container backend (runsc CLI)
 │       └── sandcastle-server/     # MCP server binary (entry point)
 ├── tests/
-│   └── integration.sh      # Shell-based integration tests
+│   └── integration.sh      # Shell-based integration tests (6 tests)
 ├── README.md               # Product overview and MCP tool reference
 └── .gitignore
 ```
@@ -51,8 +52,17 @@ sandcastle/
 - ✅ Static musl executor binary for container compatibility
 - ✅ Rootfs images built for Python 3.12, Node 20, Bash 5
 
+### Phase 3 — gVisor Backend (Medium Isolation) ✅ Complete
+- ✅ `sandcastle-gvisor` crate with GvisorSandbox implementing SandboxRuntime
+- ✅ IsolationLevel enum (Low/Medium/High) with per-request routing
+- ✅ Manager refactored: `HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>` for multi-backend
+- ✅ MCP tools accept `isolation` parameter ("low", "medium") — defaults to "low"
+- ✅ Server registers both backends: ProcessSandbox (Low) + GvisorSandbox (Medium)
+- ✅ Graceful degradation when runsc not installed
+- ✅ 23 unit tests + 6 integration tests (including gVisor e2e and routing tests)
+- ✅ runsc installed (release-20260406.0, ptrace platform)
+
 ### Upcoming
-- ⬜ gVisor backend (Phase 3) — syscall interception for medium isolation
 - ⬜ Firecracker microVM backend (Phase 4) — hardware virtualization for high isolation
 - ⬜ Network allowlisting with DNS proxy
 - ⬜ Pre-warmed sandbox pools
@@ -63,11 +73,17 @@ sandcastle/
 # Build everything
 cd service && cargo build
 
-# Run all unit tests (15 tests)
+# Run all unit tests (23 tests)
 cd service && cargo test
 
-# Run e2e integration test (requires root + rootfs images)
+# Run e2e integration test for ProcessSandbox (requires root + rootfs images)
 cd service && sudo $(which cargo) test -p sandcastle-process --test e2e -- --nocapture
+
+# Run e2e integration test for GvisorSandbox (requires root + runsc + rootfs images)
+cd service && sudo $(which cargo) test -p sandcastle-gvisor --test e2e -- --nocapture
+
+# Run full integration test suite (6 tests, requires root + rootfs + runsc)
+sudo ./tests/integration.sh
 
 # Build static executor for containers
 cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl

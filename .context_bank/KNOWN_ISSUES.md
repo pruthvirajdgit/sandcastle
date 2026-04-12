@@ -139,7 +139,32 @@ sudo chown -R $USER:$USER service/target
 If a test crashes, container state may be left in `/run/sandcastle/`. Clean up:
 ```bash
 sudo rm -rf /run/sandcastle-test /tmp/sandcastle-test
+sudo rm -rf /run/sandcastle-gvisor-test /tmp/sandcastle-gvisor-test
 ```
+
+---
+
+## gVisor (runsc)
+
+### 1. runsc stderr corrupts JSON protocol
+runsc writes log output to stderr by default. If the GvisorSandbox doesn't redirect stderr to `Stdio::null()`, runsc logs get mixed into the JSON protocol stream on stdout, corrupting executor responses.
+**Fix**: Always set `.stderr(Stdio::null())` on the runsc Command.
+
+### 2. Workspace directories need chmod 777
+Inside gVisor, the container process may run with different UID mappings. The workspace directory (bind-mounted from host) needs `chmod 777` for the executor to write code files and output.
+**Fix**: `std::fs::set_permissions(workspace_dir, Permissions::from_mode(0o777))` in `create()`.
+
+### 3. runsc run = create + start + wait
+Unlike libcontainer which separates `create()` and `start()`, runsc's `run` command does both in one shot. This means the GvisorSandbox's `create()` only preps the bundle — the actual container spawn happens in `start()`.
+
+### 4. OCI spec version for gVisor
+runsc works with OCI spec version `1.1.0-rc.1`. Using `1.0.2` (like libcontainer) may cause warnings or compatibility issues.
+
+### 5. 500ms readiness sleep is fragile
+After spawning `runsc run`, the GvisorSandbox sleeps 500ms to wait for the executor to be ready. This can be flaky under load. A proper readiness protocol (executor emits `{"ready":true}` on startup) is deferred for now.
+
+### 6. runsc state directory must be separate
+runsc uses `--root /run/sandcastle/gvisor` for container state. This MUST be separate from libcontainer's `/run/sandcastle` to avoid conflicts between the two runtimes.
 
 ---
 
