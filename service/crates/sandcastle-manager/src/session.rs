@@ -1,10 +1,11 @@
-use sandcastle_runtime::{Language, SandboxId};
+use sandcastle_runtime::{Language, IsolationLevel, SandboxId};
 use std::time::Instant;
 
 /// Tracks a live sandbox session.
 pub struct Session {
     pub sandbox_id: SandboxId,
     pub language: Language,
+    pub isolation: IsolationLevel,
     pub created_at: Instant,
     pub last_active: Instant,
     pub status: SessionStatus,
@@ -18,11 +19,12 @@ pub enum SessionStatus {
 }
 
 impl Session {
-    pub fn new(sandbox_id: SandboxId, language: Language) -> Self {
+    pub fn new(sandbox_id: SandboxId, language: Language, isolation: IsolationLevel) -> Self {
         let now = Instant::now();
         Self {
             sandbox_id,
             language,
+            isolation,
             created_at: now,
             last_active: now,
             status: SessionStatus::Active,

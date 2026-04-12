@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use sandcastle_manager::SandboxManager;
 use sandcastle_runtime::{
-    ExecRequest, ExecResult, Language, Result as SandResult, SandboxConfig, SandboxId,
-    SandboxRuntime, SandboxStatus, ResourceLimits,
+    ExecRequest, ExecResult, IsolationLevel, Language, Result as SandResult, SandboxConfig,
+    SandboxId, SandboxRuntime, SandboxStatus, ResourceLimits,
 };
 
 /// Stub runtime for development and testing — returns mock results.
@@ -69,6 +69,9 @@ pub struct ExecuteCodeParams {
     /// Programming language: python, javascript, or bash.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Isolation level: low (namespaces), medium (gVisor), high (Firecracker).
+    #[serde(default = "default_isolation")]
+    pub isolation: String,
     /// Max execution time in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u32,
@@ -79,6 +82,9 @@ pub struct CreateSandboxParams {
     /// Programming language: python, javascript, or bash.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Isolation level: low (namespaces), medium (gVisor), high (Firecracker).
+    #[serde(default = "default_isolation")]
+    pub isolation: String,
     /// Memory limit in MB.
     #[serde(default = "default_memory")]
     pub memory_mb: u32,
@@ -125,6 +131,7 @@ pub struct DestroyParams {
 }
 
 fn default_language() -> String { "python".to_string() }
+fn default_isolation() -> String { "low".to_string() }
 fn default_timeout() -> u32 { 30 }
 fn default_memory() -> u32 { 512 }
 fn default_session_timeout() -> u32 { 300 }
@@ -155,10 +162,14 @@ impl SandcastleTools {
             Ok(l) => l,
             Err(e) => return format!("error: {e}"),
         };
+        let isolation = match parse_isolation(&p.isolation) {
+            Ok(i) => i,
+            Err(e) => return format!("error: {e}"),
+        };
 
         let timeout = Duration::from_secs(p.timeout_seconds as u64);
 
-        match self.manager.execute_oneshot(&p.code, lang, timeout).await {
+        match self.manager.execute_oneshot(&p.code, lang, isolation, timeout).await {
             Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| format!("error: {e}")),
             Err(e) => format!("error: {e}"),
         }
@@ -172,6 +183,10 @@ impl SandcastleTools {
             Ok(l) => l,
             Err(e) => return format!("error: {e}"),
         };
+        let isolation = match parse_isolation(&p.isolation) {
+            Ok(i) => i,
+            Err(e) => return format!("error: {e}"),
+        };
 
         let mut limits = ResourceLimits::default();
         limits.memory_mb = p.memory_mb;
@@ -179,6 +194,7 @@ impl SandcastleTools {
 
         let config = SandboxConfig {
             language: lang,
+            isolation,
             limits,
             env_vars: Default::default(),
         };
@@ -188,6 +204,7 @@ impl SandcastleTools {
                 serde_json::json!({
                     "session_id": session_id,
                     "language": lang.to_string(),
+                    "isolation": isolation.to_string(),
                 })
                 .to_string()
             }
@@ -262,5 +279,14 @@ fn parse_language(s: &str) -> std::result::Result<Language, String> {
         "javascript" | "js" => Ok(Language::Javascript),
         "bash" | "sh" => Ok(Language::Bash),
         other => Err(format!("unsupported language: {other}")),
+    }
+}
+
+fn parse_isolation(s: &str) -> std::result::Result<IsolationLevel, String> {
+    match s {
+        "low" => Ok(IsolationLevel::Low),
+        "medium" => Ok(IsolationLevel::Medium),
+        "high" => Ok(IsolationLevel::High),
+        other => Err(format!("unsupported isolation level: {other}. Valid: low, medium, high")),
     }
 }

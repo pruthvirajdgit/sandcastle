@@ -1,0 +1,17 @@
+[package]
+name = "sandcastle-gvisor"
+version = "0.1.0"
+edition = "2021"
+description = "gVisor (runsc) sandbox backend for Sandcastle"
+
+[dependencies]
+sandcastle-runtime = { path = "../sandcastle-runtime" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+nix = { version = "0.29", features = ["user"] }

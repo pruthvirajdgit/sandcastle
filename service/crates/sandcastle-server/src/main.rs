@@ -1,5 +1,6 @@
 mod tools;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -8,7 +9,8 @@ use tracing_subscriber::EnvFilter;
 
 use sandcastle_manager::{FileConfig, ManagerConfig, SandboxManager};
 use sandcastle_process::{ProcessConfig, ProcessSandbox};
-use sandcastle_runtime::ResourceLimits;
+use sandcastle_gvisor::{GvisorConfig, GvisorSandbox};
+use sandcastle_runtime::{IsolationLevel, ResourceLimits, SandboxRuntime};
 
 #[derive(Parser)]
 #[command(name = "sandcastle", about = "Sandboxed code execution for AI agents")]
@@ -56,11 +58,28 @@ async fn main() -> anyhow::Result<()> {
 
             tracing::info!("starting sandcastle MCP server on stdio");
 
+            // Build runtime map — register available backends
+            let mut runtimes: HashMap<IsolationLevel, Arc<dyn SandboxRuntime>> = HashMap::new();
+
+            // Low isolation: ProcessSandbox (Linux namespaces via libcontainer)
             let process_config = ProcessConfig::default();
-            let runtime = Arc::new(ProcessSandbox::new(process_config));
-            // Ensure runtime directories exist
-            runtime.ensure_dirs().expect("failed to create runtime directories");
-            let manager = Arc::new(SandboxManager::new(runtime, config));
+            let process_runtime = Arc::new(ProcessSandbox::new(process_config));
+            process_runtime.ensure_dirs().expect("failed to create process runtime directories");
+            runtimes.insert(IsolationLevel::Low, process_runtime);
+            tracing::info!("registered backend: low (ProcessSandbox/libcontainer)");
+
+            // Medium isolation: GvisorSandbox (runsc)
+            let gvisor_config = GvisorConfig::default();
+            let gvisor_runtime = GvisorSandbox::new(gvisor_config);
+            if gvisor_runtime.is_available() {
+                gvisor_runtime.ensure_dirs().expect("failed to create gVisor runtime directories");
+                runtimes.insert(IsolationLevel::Medium, Arc::new(gvisor_runtime));
+                tracing::info!("registered backend: medium (GvisorSandbox/runsc)");
+            } else {
+                tracing::warn!("runsc not found — medium isolation (gVisor) unavailable");
+            }
+
+            let manager = Arc::new(SandboxManager::new(runtimes, config));
 
             // Start reaper background task
             let reaper = manager.clone();

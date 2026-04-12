@@ -1266,6 +1266,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandcastle-gvisor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nix 0.29.0",
+ "sandcastle-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "sandcastle-manager"
 version = "0.1.0"
 dependencies = [
@@ -1313,6 +1327,7 @@ dependencies = [
  "async-trait",
  "clap",
  "rmcp",
+ "sandcastle-gvisor",
  "sandcastle-manager",
  "sandcastle-process",
  "sandcastle-runtime",

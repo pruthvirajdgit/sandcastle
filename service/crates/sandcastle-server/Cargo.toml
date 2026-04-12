@@ -12,6 +12,7 @@ path = "src/main.rs"
 sandcastle-runtime = { path = "../sandcastle-runtime" }
 sandcastle-manager = { path = "../sandcastle-manager" }
 sandcastle-process = { path = "../sandcastle-process" }
+sandcastle-gvisor = { path = "../sandcastle-gvisor" }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 tokio = { workspace = true }
 serde = { workspace = true }
