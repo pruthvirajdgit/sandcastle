@@ -171,3 +171,32 @@ anyhow = "1"
 
 - Name: `pruthvirajdgit`
 - Email: `pruthvirajdgit@users.noreply.github.com`
+
+---
+
+## Copilot MCP Integration
+
+Sandcastle is configured as a Copilot CLI MCP server via:
+
+**Config file**: `~/.copilot/mcp-config.json`
+
+```json
+{
+  "mcpServers": {
+    "sandcastle": {
+      "type": "stdio",
+      "command": "sudo",
+      "args": [
+        "/home/azureuser/sandcastle/service/target/debug/sandcastle",
+        "serve", "--transport", "stdio"
+      ]
+    }
+  }
+}
+```
+
+**Activation**: After editing the config, run `/restart` in Copilot CLI or start a new session.
+
+**Verification**: Run `/mcp` in Copilot CLI — should show `sandcastle` as connected with 6 tools.
+
+**Note**: The server requires root (`sudo`) because container creation needs root privileges. Ensure passwordless sudo is configured or the binary has appropriate capabilities.

@@ -201,8 +201,36 @@ The executor binary (`/sandbox/executor`) is copied into each rootfs. It MUST be
 
 | Backend | Crate | Status | Isolation Level |
 |---------|-------|--------|-----------------|
-| Linux namespaces (libcontainer) | sandcastle-process | ✅ Working | Low |
-| gVisor (runsc) | sandcastle-gvisor | ⬜ Phase 2 | Medium |
-| Firecracker (microVM) | sandcastle-firecracker | ⬜ Phase 3 | High |
+| Linux namespaces (libcontainer) | sandcastle-process | ✅ Working (Phase 1 & 2) | Low |
+| gVisor (runsc) | sandcastle-gvisor | ⬜ Phase 3 | Medium |
+| Firecracker (microVM) | sandcastle-firecracker | ⬜ Phase 4 | High |
 
 All backends implement the same `SandboxRuntime` trait. The manager and server are backend-agnostic.
+
+## Copilot MCP Integration (Phase 2 — Complete)
+
+Sandcastle is registered as an MCP server for GitHub Copilot CLI via:
+
+```
+~/.copilot/mcp-config.json
+```
+
+```json
+{
+  "mcpServers": {
+    "sandcastle": {
+      "type": "stdio",
+      "command": "sudo",
+      "args": ["/home/azureuser/sandcastle/service/target/debug/sandcastle", "serve", "--transport", "stdio"]
+    }
+  }
+}
+```
+
+Once configured, Copilot CLI automatically starts the Sandcastle server and exposes all 6 tools. The agent can then call `execute_code`, `create_sandbox`, etc. as native MCP tools — code executes inside namespace-isolated containers on the same machine.
+
+### Verified Capabilities
+- **One-shot execution**: `execute_code("print('hello')", language="python")` → runs in ephemeral container
+- **Persistent sessions**: `create_sandbox` → multiple `execute_in_session` calls → `destroy_sandbox`
+- **File transfer**: `upload_file` (host → sandbox) → execute code that reads it → `download_file` (sandbox → host)
+- **Multi-language**: Python 3.12, JavaScript (Node 20), Bash 5

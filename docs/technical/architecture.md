@@ -2,7 +2,9 @@
 
 ## Overview
 
-Sandcastle is a Rust-based MCP server that provides tiered sandboxed code execution. It manages pools of pre-warmed sandboxes at three isolation levels and exposes them as MCP tools.
+Sandcastle is a Rust-based MCP server that provides sandboxed code execution for AI agents. It currently implements process-level isolation via Linux namespaces (libcontainer/youki) and exposes 6 MCP tools. The architecture supports pluggable backends — gVisor and Firecracker backends are planned for future phases.
+
+> **Note**: For detailed code-level architecture, crate APIs, and implementation details, see the `.context_bank/` directory (especially `ARCHITECTURE.md` and `CRATE_REFERENCE.md`). This document covers the high-level design.
 
 ## System Components
 

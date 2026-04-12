@@ -34,14 +34,28 @@ sandcastle/
 └── .gitignore
 ```
 
-## Current Status (Phase 1 — Complete)
+## Current Status
 
-- ✅ 5-crate Rust workspace compiles and passes all tests
-- ✅ ProcessSandbox runs Python/JS/Bash in namespace-isolated containers
+### Phase 1 — Foundation ✅ Complete
+- ✅ 5-crate Rust workspace compiles and passes all tests (15 unit tests)
+- ✅ ProcessSandbox runs Python/JS/Bash in namespace-isolated containers via libcontainer
 - ✅ MCP server exposes 6 tools: execute_code, create_sandbox, execute_in_session, upload_file, download_file, destroy_sandbox
-- ✅ E2E test verified: Python code executes inside container and returns correct output
-- ⬜ gVisor backend (Phase 2)
-- ⬜ Firecracker microVM backend (Phase 3)
+- ✅ E2E integration test verified end-to-end
+
+### Phase 2 — MCP Integration & Validation ✅ Complete
+- ✅ MCP server connected to GitHub Copilot CLI as a native tool provider
+- ✅ Live code execution verified: Python runs inside containers via MCP tool calls
+- ✅ File transfer pipeline working end-to-end (upload → execute → download)
+- ✅ Persistent sessions working (create_sandbox → execute_in_session → destroy_sandbox)
+- ✅ Copilot MCP config at `~/.copilot/mcp-config.json`
+- ✅ Static musl executor binary for container compatibility
+- ✅ Rootfs images built for Python 3.12, Node 20, Bash 5
+
+### Upcoming
+- ⬜ gVisor backend (Phase 3) — syscall interception for medium isolation
+- ⬜ Firecracker microVM backend (Phase 4) — hardware virtualization for high isolation
+- ⬜ Network allowlisting with DNS proxy
+- ⬜ Pre-warmed sandbox pools
 
 ## Quick Commands
 
@@ -61,6 +75,10 @@ cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-m
 # Build rootfs images (requires Docker + root)
 sudo ./scripts/build-rootfs.sh
 
-# Start MCP server
-cd service && cargo run -p sandcastle-server -- serve --transport stdio
+# Start MCP server (requires root for container creation)
+sudo service/target/debug/sandcastle serve --transport stdio
+
+# Configure as Copilot MCP server
+# Config file: ~/.copilot/mcp-config.json
+# After adding config, run /restart in Copilot CLI to pick it up
 ```
