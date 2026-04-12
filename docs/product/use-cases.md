@@ -194,16 +194,10 @@ Agent: execute_code(
 ```
 execute_code → get result → done
 ```
-Use for: quick calculations, simple scripts, verifying code snippets.
+Use for: quick calculations, simple scripts, verifying code snippets. Sandbox is created and destroyed automatically within the single call.
 
 ### Pattern 2: Session-Based
 ```
 create_sandbox → upload files → execute (multiple) → download results → destroy
 ```
-Use for: data analysis, testing, multi-step workflows.
-
-### Pattern 3: Long-Running
-```
-create_sandbox(timeout=3600) → execute periodically → destroy when done
-```
-Use for: monitoring scripts, background processing, development environments.
+Use for: data analysis, testing, multi-step workflows, long-running development environments. Sandbox persists across calls — state, files, and installed packages are preserved. Session lifetime is controlled by `timeout_seconds` (up to 3600s).
