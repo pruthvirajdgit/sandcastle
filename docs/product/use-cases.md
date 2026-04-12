@@ -28,14 +28,15 @@ Agent: "Here's the solution, verified and working: ..."
 
 **Flow**:
 ```
-User: "Analyze this sales data" [attaches CSV]
+User: "Analyze this sales data" [attaches CSV, saved to /data/sales.csv]
 Agent: create_sandbox(language="python", memory_mb=2048)
-Agent: upload_file(sandbox_id, "sales.csv", csv_content)
+Agent: upload_file(sandbox_id, host_path="/data/sales.csv", sandbox_path="sales.csv")
 Agent: execute_in_sandbox(sandbox_id, "import pandas as pd; df = pd.read_csv('sales.csv'); ...")
 Agent: execute_in_sandbox(sandbox_id, "... generate charts, save to output.png ...")
-Agent: download_file(sandbox_id, "output.png")
+Agent: download_file(sandbox_id, sandbox_path="output.png")
+       → returns { host_path: "/output/sb-a1b2c3d4/output.png" }
 Agent: destroy_sandbox(sandbox_id)
-Agent: "Here's the analysis: [chart] Revenue is up 23% QoQ..."
+Agent: "Here's the analysis: [chart at /output/sb-a1b2c3d4/output.png] Revenue is up 23% QoQ..."
 ```
 
 **Config**:
@@ -77,8 +78,8 @@ Agent: "Your solution produces correct output for 4/5 test cases. Test case 3 fa
 **Flow**:
 ```
 Agent: create_sandbox(language="python", allowed_domains=["pypi.org"], timeout=300)
-Agent: upload_file(sandbox_id, "app.py", source_code)
-Agent: upload_file(sandbox_id, "requirements.txt", deps)
+Agent: upload_file(sandbox_id, host_path="/repo/app.py", sandbox_path="app.py")
+Agent: upload_file(sandbox_id, host_path="/repo/requirements.txt", sandbox_path="requirements.txt")
 Agent: execute_in_sandbox(sandbox_id, "pip install -r requirements.txt")
 Agent: execute_in_sandbox(sandbox_id, "python -m pytest test_app.py -v")
 Agent: destroy_sandbox(sandbox_id)
@@ -151,9 +152,9 @@ User B's agent: execute_in_sandbox("sb-user-b", code_b)
 **Flow**:
 ```
 Agent: create_sandbox(language="javascript", allowed_domains=["registry.npmjs.org"])
-Agent: upload_file(sandbox_id, "package.json", ...)
-Agent: upload_file(sandbox_id, "src/index.js", ...)
-Agent: upload_file(sandbox_id, "test/index.test.js", ...)
+Agent: upload_file(sandbox_id, host_path="/repo/package.json", sandbox_path="package.json")
+Agent: upload_file(sandbox_id, host_path="/repo/src/index.js", sandbox_path="src/index.js")
+Agent: upload_file(sandbox_id, host_path="/repo/test/index.test.js", sandbox_path="test/index.test.js")
 Agent: execute_in_sandbox(sandbox_id, "npm install && npm test")
 Agent: execute_in_sandbox(sandbox_id, "npx eslint src/")
 Agent: destroy_sandbox(sandbox_id)
