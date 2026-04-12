@@ -147,35 +147,46 @@ Automated pipeline → agent generates and runs tests.
 
 ## Roadmap
 
-### Phase 1 — Foundation
+### Phase 1 — Foundation (Process Isolation + Core Infrastructure)
 - MCP server (stdio transport)
-- Low isolation backend (namespaces + seccomp)
-- Single language (Python)
-- One-shot execute_code tool
+- Low isolation backend (Linux namespaces + seccomp + cgroups)
+- Core tools: `execute_code`, `create_sandbox`, `execute_in_sandbox`, `destroy_sandbox`
+- File tools: `upload_file`, `download_file` (host path based)
+- Multi-language support (Python, JavaScript, Bash)
 - CLI for local testing
+- Resource limits (CPU, memory, timeout, disk)
+- Network-zero by default
+- Configurable `allowed_input_dirs` and `output_dir`
+- Basic logging and metrics
 
-### Phase 2 — Security
-- Medium isolation (gVisor)
-- Network allowlisting
-- Session-based sandboxes (create/execute/destroy)
-- File upload/download
-- Multi-language (Python, JavaScript, Bash)
+### Phase 2 — Tiered Isolation (gVisor + Firecracker)
+- Medium isolation backend (gVisor / runsc)
+- High isolation backend (Firecracker microVM via KVM)
+- Pre-warmed sandbox pools per isolation level
+- Snapshot-based restore for Firecracker (fast wake)
+- Network allowlisting with DNS proxy
+- HTTP+SSE transport for remote agents
+- Pool management (target size, replenishment, idle timeout)
 
-### Phase 3 — Performance
-- High isolation (Firecracker)
-- Pre-warmed sandbox pools
-- Snapshot-based restore
-- HTTP transport for remote agents
+### Phase 3 — Security Hardening
+- Malware scanning on file downloads (YARA rules + ClamAV)
+- File quarantine on malware detection
+- IP pinning for allowlisted domains (anti domain-fronting)
+- Audit logging (creation, execution, network blocks, resource usage)
+- Content type restrictions on downloads
+- Seccomp profile tuning per language runtime
+- Security benchmarks and penetration testing
 
-### Phase 4 — Scale
+### Phase 4 — Scale & Monetization
 - Managed service (Sandcastle Cloud)
-- Usage-based billing
+- Usage-based billing per execution-second
 - Dashboard + analytics
 - More languages (Rust, Go, TypeScript)
+- API key management
 
 ### Phase 5 — Enterprise
 - SSO/SAML
-- Audit logs
-- Custom policies
-- On-prem deployment
-- SLA
+- Custom isolation policies
+- On-prem deployment assistance
+- SLA guarantees
+- Compliance documentation (SOC2, ISO 27001)

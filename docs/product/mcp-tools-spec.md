@@ -220,7 +220,7 @@ Execute code in an existing sandbox. State from previous executions is preserved
 
 ### 4. `upload_file`
 
-Upload a file into an existing sandbox's `/workspace` directory.
+Upload a file from the host into an existing sandbox's `/workspace` directory. The file is read from the host filesystem and injected into the sandbox — the agent provides a host path, not file content.
 
 **Input Schema:**
 ```json
@@ -231,21 +231,16 @@ Upload a file into an existing sandbox's `/workspace` directory.
       "type": "string",
       "description": "ID returned by create_sandbox"
     },
-    "path": {
+    "host_path": {
       "type": "string",
-      "description": "Path inside sandbox (relative to /workspace). E.g., 'data.csv' or 'src/main.py'"
+      "description": "Absolute path to file on host machine. Must be within allowed input directories (configured in sandcastle.toml)"
     },
-    "content": {
+    "sandbox_path": {
       "type": "string",
-      "description": "File content (text). For binary files, use base64 encoding with content_encoding=base64"
-    },
-    "content_encoding": {
-      "type": "string",
-      "enum": ["text", "base64"],
-      "description": "Content encoding. Default: text"
+      "description": "Destination path inside sandbox (relative to /workspace). E.g., 'data.csv' or 'src/main.py'"
     }
   },
-  "required": ["sandbox_id", "path", "content"]
+  "required": ["sandbox_id", "host_path", "sandbox_path"]
 }
 ```
 
@@ -254,17 +249,19 @@ Upload a file into an existing sandbox's `/workspace` directory.
 {
   "type": "object",
   "properties": {
-    "path": { "type": "string", "description": "Full path in sandbox" },
+    "sandbox_path": { "type": "string", "description": "Full path inside sandbox" },
     "size_bytes": { "type": "integer" }
   }
 }
 ```
+
+**Security:** Only files within configured `allowed_input_dirs` can be uploaded. Sandcastle rejects paths outside these directories (prevents reading arbitrary host files).
 
 ---
 
 ### 5. `download_file`
 
-Download a file from an existing sandbox.
+Extract a file from the sandbox to the host filesystem. Sandcastle copies the file from the sandbox to a designated output directory on the host — the agent receives the host path, not the file content.
 
 **Input Schema:**
 ```json
@@ -275,17 +272,16 @@ Download a file from an existing sandbox.
       "type": "string",
       "description": "ID returned by create_sandbox"
     },
-    "path": {
+    "sandbox_path": {
       "type": "string",
       "description": "Path inside sandbox (relative to /workspace)"
     },
-    "content_encoding": {
+    "host_path": {
       "type": "string",
-      "enum": ["text", "base64"],
-      "description": "How to encode the response. Default: text"
+      "description": "Optional. Destination path on host. If omitted, Sandcastle writes to {output_dir}/{sandbox_id}/{filename}"
     }
   },
-  "required": ["sandbox_id", "path"]
+  "required": ["sandbox_id", "sandbox_path"]
 }
 ```
 
@@ -294,13 +290,18 @@ Download a file from an existing sandbox.
 {
   "type": "object",
   "properties": {
-    "path": { "type": "string" },
-    "content": { "type": "string" },
-    "content_encoding": { "type": "string" },
-    "size_bytes": { "type": "integer" }
+    "host_path": { "type": "string", "description": "Absolute path where file was written on host" },
+    "size_bytes": { "type": "integer" },
+    "scanned": { "type": "boolean", "description": "Whether malware scan was performed (Phase 3)" }
   }
 }
 ```
+
+**Security:**
+- Files are written to a designated `output_dir` (configured in sandcastle.toml). Agent cannot write to arbitrary host paths.
+- Max file size enforced (default 10MB, configurable).
+- **Phase 3**: Optional malware scanning (YARA rules + ClamAV) before writing to host. If malware detected, file is quarantined and agent receives an error.
+- File content never passes through the MCP response — only the host path is returned. This avoids bloating MCP messages with large binary data.
 
 ---
 
