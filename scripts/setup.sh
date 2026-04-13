@@ -215,18 +215,22 @@ log_ok "Executor (stdio) built"
 
 # Copy stdio executor immediately so it doesn't get overwritten by vsock build
 STDIO_EXECUTOR="$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor"
+STDIO_EXECUTOR_SAVED=$(mktemp)
+cp "$STDIO_EXECUTOR" "$STDIO_EXECUTOR_SAVED"
 
 if [ "$HAS_KVM" = true ]; then
     log_info "Building executor (vsock mode, static musl)..."
     su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode 2>&1" | tail -3
     log_ok "Executor (vsock) built"
-    # Save vsock executor separately before rebuilding stdio
+    # Save vsock executor separately (the target path now has vsock binary)
     VSOCK_EXECUTOR=$(mktemp)
     cp "$STDIO_EXECUTOR" "$VSOCK_EXECUTOR"
-    # Rebuild stdio so the canonical path has the correct binary
-    log_info "Rebuilding executor (stdio mode) to restore canonical path..."
-    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build -p sandcastle-executor --target x86_64-unknown-linux-musl 2>&1" | tail -3
+    # Restore stdio executor to the canonical target path
+    cp "$STDIO_EXECUTOR_SAVED" "$STDIO_EXECUTOR"
 fi
+
+# Clean up temp copy
+rm -f "$STDIO_EXECUTOR_SAVED"
 
 # --- Step 6: Create directory structure ---
 log_step "Step 6/9: Creating runtime directories"
@@ -343,9 +347,17 @@ MCPJSON
     log_ok "MCP config created at $MCP_CONFIG"
 fi
 
-# Only chown the specific files we created/modified (avoid symlink traversal)
-chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG_DIR"
-chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG"
+# Only chown the specific files we created/modified (reject symlinks to avoid traversal)
+if [ -L "$MCP_CONFIG_DIR" ]; then
+    log_warn "$MCP_CONFIG_DIR is a symlink — skipping chown for safety"
+else
+    chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG_DIR"
+fi
+if [ -L "$MCP_CONFIG" ]; then
+    log_warn "$MCP_CONFIG is a symlink — skipping chown for safety"
+else
+    chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG"
+fi
 
 # --- Summary ---
 log_step "Setup Complete!"
