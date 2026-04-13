@@ -2,6 +2,8 @@
 
 > **Source of truth** for AI agents working on this codebase.
 > Read this directory before making any changes.
+>
+> This is an **AI-native repository**. Any AI agent can onboard itself by reading this directory and the `docs/` folder, then start contributing immediately.
 
 ## What is Sandcastle?
 
