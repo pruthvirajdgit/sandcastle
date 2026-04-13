@@ -13,18 +13,22 @@ Sandcastle follows a **layered architecture** with clean separation between prot
 │  sandcastle-server                                        │
 │  Entry point. Parses MCP tool calls, delegates to manager │
 │  Uses: rmcp crate for MCP protocol                        │
+│  Parses `isolation` param → passes to manager             │
 ├───────────────────────────────────────────────────────────┤
 │  sandcastle-manager                                       │
 │  Session lifecycle, file transfer, input validation       │
+│  Routes requests to correct backend by IsolationLevel     │
 │  Tracks active sessions, enforces limits, reaps expired   │
 ├───────────────────────────────────────────────────────────┤
 │  sandcastle-runtime  (trait)                              │
 │  SandboxRuntime trait — the interface all backends impl   │
+│  IsolationLevel enum: Low, Medium, High                   │
 │  Shared types: SandboxId, ExecRequest, ExecResult, etc.   │
 ├───────────────────────────────────────────────────────────┤
-│  sandcastle-process  (implementation)                     │
-│  Linux namespace containers via libcontainer (youki)      │
-│  OCI spec generation, pipe-based I/O, container lifecycle │
+│  sandcastle-process  (Low isolation)                      │   sandcastle-gvisor  (Medium isolation)    │
+│  Linux namespace containers via libcontainer (youki)      │   gVisor containers via runsc CLI           │
+│  OCI spec: PID + Mount namespaces                         │   OCI spec: PID + Mount + IPC + UTS + Net  │
+│  Pipe-based I/O, container lifecycle                      │   Pipe-based I/O via `runsc run`           │
 └────────────────────────┬──────────────────────────────────┘
                          │ Pipes (stdin/stdout)
 ┌────────────────────────▼──────────────────────────────────┐
@@ -32,6 +36,7 @@ Sandcastle follows a **layered architecture** with clean separation between prot
 │  Runs INSIDE the container as PID 1                       │
 │  Reads JSON commands from stdin, spawns language runtime,  │
 │  captures output, writes JSON response to stdout          │
+│  Same binary used by ALL backends                         │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -43,6 +48,8 @@ sandcastle-server
   │     └── sandcastle-runtime (trait + types)
   ├── sandcastle-process
   │     └── sandcastle-runtime
+  ├── sandcastle-gvisor
+  │     └── sandcastle-runtime
   └── sandcastle-runtime
 
 sandcastle-executor (standalone binary, no deps on other crates)
@@ -51,25 +58,22 @@ sandcastle-executor (standalone binary, no deps on other crates)
 ## Data Flow: execute_code (One-Shot)
 
 ```
-1. Agent sends MCP tool call: execute_code(code="print(42)", language="python")
+1. Agent sends MCP tool call: execute_code(code="print(42)", language="python", isolation="medium")
 2. sandcastle-server receives via rmcp, routes to SandcastleTools::execute_code()
-3. SandcastleTools delegates to SandboxManager::execute_oneshot()
-4. Manager calls runtime.create() → runtime.start() → runtime.execute() → runtime.destroy()
-5. ProcessSandbox::create():
-   a. Generates unique ID: "sc-{uuid}"
-   b. Creates OCI config.json (namespaces, mounts, resource limits)
-   c. Creates stdin/stdout pipes
-   d. Calls ContainerBuilder::new().as_init(bundle).build()
-   e. libcontainer forks, sets up namespaces, blocks at notify socket
-6. ProcessSandbox::start():
-   a. Container::load(state_dir/id).start()
-   b. Executor binary begins running inside container, reading stdin
-7. ProcessSandbox::execute():
-   a. Writes JSON to stdin pipe: {"action":"exec","language":"python","code":"print(42)","timeout_ms":30000}
-   b. Reads JSON from stdout pipe: {"stdout":"42\n","stderr":"","exit_code":0,...}
-8. ProcessSandbox::destroy():
-   a. Container::kill(SIGTERM) → Container::delete(force=true)
-   b. Cleans up bundle dir and workspace dir
+3. Server parses isolation param → IsolationLevel::Medium
+4. SandcastleTools delegates to SandboxManager::execute_oneshot(code, language, timeout, isolation)
+5. Manager looks up runtime for IsolationLevel::Medium → GvisorSandbox
+6. Manager calls runtime.create() → runtime.start() → runtime.execute() → runtime.destroy()
+7. For GvisorSandbox:
+   a. create(): Generates ID "gv-{uuid}", creates OCI bundle (5 namespaces), symlinks rootfs
+   b. start(): Spawns `runsc run --bundle <path> <id>`, waits for executor readiness
+   c. execute(): Writes JSON to stdin pipe, reads JSON response from stdout pipe
+   d. destroy(): `runsc kill` + `runsc delete --force` + cleanup dirs
+8. For ProcessSandbox:
+   a. create(): Generates ID "sc-{uuid}", creates OCI config, builds container via libcontainer
+   b. start(): Container::load().start() resumes blocked init
+   c. execute(): Same JSON pipe protocol
+   d. destroy(): Container::kill + delete + cleanup dirs
 9. Result propagates back up → serialized as MCP response → sent to agent
 ```
 
@@ -95,9 +99,21 @@ sandcastle-executor (standalone binary, no deps on other crates)
    - Manager removes session, calls stop + destroy on runtime
 ```
 
-## Container Isolation Model (ProcessSandbox)
+## Container Isolation Model
 
-Each container gets:
+### Multi-Backend Routing
+
+The manager routes requests to the correct backend based on `IsolationLevel`:
+
+| Level | Backend | ID Prefix | Namespaces | Container Runtime |
+|-------|---------|-----------|------------|-------------------|
+| Low | ProcessSandbox | `sc-` | PID + Mount | libcontainer (youki) |
+| Medium | GvisorSandbox | `gv-` | PID + Mount + IPC + UTS + Net | runsc (gVisor) |
+| High | (Phase 4) | — | Full VM | Firecracker |
+
+Default isolation is **Low**. Agents choose isolation per-request via the `isolation` parameter.
+
+### ProcessSandbox Isolation (Low)
 
 | Resource       | Isolation Mechanism          | Details                           |
 |----------------|------------------------------|-----------------------------------|
@@ -134,7 +150,27 @@ Each container gets:
 }
 ```
 
-## Executor Protocol
+### GvisorSandbox Isolation (Medium)
+
+gVisor intercepts all syscalls at the kernel boundary, providing stronger isolation than namespace-only containers:
+
+| Resource       | Isolation Mechanism          | Details                           |
+|----------------|------------------------------|-----------------------------------|
+| Syscalls       | gVisor Sentry (ptrace)       | All syscalls intercepted + filtered |
+| PID            | PID namespace                | Container sees only its own PIDs  |
+| Filesystem     | Mount namespace + bind mount | Read-only rootfs + /workspace RW  |
+| Network        | Network namespace            | Fully isolated (no connectivity)  |
+| IPC            | IPC namespace                | Isolated shared memory            |
+| Hostname       | UTS namespace                | Isolated hostname                 |
+
+gVisor uses the `ptrace` platform (no KVM required — works on any VM). runsc state lives in `/run/sandcastle/gvisor` (separate from libcontainer's `/run/sandcastle`).
+
+Key differences from ProcessSandbox:
+- **5 namespaces** (pid, mount, ipc, uts, network) vs 2 (pid, mount)
+- **runsc run** = create + start + wait in one command (direct stdin/stdout pipes)
+- **runsc stderr** redirected to null to prevent JSON protocol corruption
+- **Workspace dirs** need chmod 777 for container write access inside gVisor
+- Container IDs prefixed `gv-` (vs `sc-` for ProcessSandbox)
 
 The executor binary (`sandcastle-executor`) runs as PID 1 inside the container. It communicates with the host via JSON lines over stdin/stdout:
 
@@ -197,12 +233,12 @@ The executor binary (`/sandbox/executor`) is copied into each rootfs. It MUST be
 | `download_file` | Copy file from sandbox /workspace to host | Yes |
 | `destroy_sandbox` | Destroy session and cleanup | Yes |
 
-## Future Backends (Not Yet Implemented)
+## Backends
 
 | Backend | Crate | Status | Isolation Level |
 |---------|-------|--------|-----------------|
 | Linux namespaces (libcontainer) | sandcastle-process | ✅ Working (Phase 1 & 2) | Low |
-| gVisor (runsc) | sandcastle-gvisor | ⬜ Phase 3 | Medium |
+| gVisor (runsc) | sandcastle-gvisor | ✅ Working (Phase 3) | Medium |
 | Firecracker (microVM) | sandcastle-firecracker | ⬜ Phase 4 | High |
 
 All backends implement the same `SandboxRuntime` trait. The manager and server are backend-agnostic.

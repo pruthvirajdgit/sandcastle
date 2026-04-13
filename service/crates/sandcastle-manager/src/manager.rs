@@ -6,27 +6,46 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use sandcastle_runtime::{
-    ExecRequest, ExecResult, Language, Result, SandboxConfig, SandboxId, SandboxRuntime,
-    SandcastleError,
+    ExecRequest, ExecResult, IsolationLevel, Language, Result, SandboxConfig, SandboxId,
+    SandboxRuntime, SandcastleError,
 };
 
 use crate::config::ManagerConfig;
 use crate::session::{Session, SessionStatus};
 
 /// Central manager for sandbox lifecycle, session tracking, and file validation.
+/// Supports multiple backends keyed by isolation level.
 pub struct SandboxManager {
-    runtime: Arc<dyn SandboxRuntime>,
+    runtimes: HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>,
     sessions: RwLock<HashMap<String, Session>>,
     config: ManagerConfig,
 }
 
 impl SandboxManager {
-    pub fn new(runtime: Arc<dyn SandboxRuntime>, config: ManagerConfig) -> Self {
+    /// Create a manager with multiple backends for different isolation levels.
+    pub fn new(
+        runtimes: HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>,
+        config: ManagerConfig,
+    ) -> Self {
         Self {
-            runtime,
+            runtimes,
             sessions: RwLock::new(HashMap::new()),
             config,
         }
+    }
+
+    /// Convenience: create a manager with a single runtime at the default isolation level.
+    pub fn with_runtime(runtime: Arc<dyn SandboxRuntime>, config: ManagerConfig) -> Self {
+        let mut runtimes = HashMap::new();
+        runtimes.insert(IsolationLevel::default(), runtime);
+        Self::new(runtimes, config)
+    }
+
+    /// Look up the runtime for a given isolation level.
+    fn get_runtime(&self, isolation: IsolationLevel) -> Result<&Arc<dyn SandboxRuntime>> {
+        self.runtimes
+            .get(&isolation)
+            .ok_or_else(|| SandcastleError::UnsupportedIsolation(isolation.to_string()))
     }
 
     /// One-shot execution: create sandbox, run code, destroy, return result.
@@ -34,26 +53,33 @@ impl SandboxManager {
         &self,
         code: &str,
         language: Language,
+        isolation: IsolationLevel,
         timeout: std::time::Duration,
     ) -> Result<ExecResult> {
+        let runtime = self.get_runtime(isolation)?;
+
         let config = SandboxConfig {
             language,
+            isolation,
             limits: self.config.defaults.clone(),
             env_vars: HashMap::new(),
         };
 
-        let sandbox_id = self.runtime.create(&config).await?;
-        self.runtime.start(&sandbox_id).await?;
+        let sandbox_id = runtime.create(&config).await?;
+        runtime.start(&sandbox_id).await?;
 
         let request = ExecRequest {
             code: code.to_string(),
             timeout,
         };
 
-        let result = self.runtime.execute(&sandbox_id, &request).await;
+        let result = runtime.execute(&sandbox_id, &request).await;
 
         // Always destroy, even if execute failed
-        if let Err(e) = self.runtime.destroy(&sandbox_id).await {
+        if let Err(e) = runtime.stop(&sandbox_id).await {
+            warn!("failed to stop oneshot sandbox {sandbox_id}: {e}");
+        }
+        if let Err(e) = runtime.destroy(&sandbox_id).await {
             warn!("failed to destroy oneshot sandbox {sandbox_id}: {e}");
         }
 
@@ -62,6 +88,8 @@ impl SandboxManager {
 
     /// Create a persistent sandbox session.
     pub async fn create_session(&self, config: SandboxConfig) -> Result<String> {
+        let runtime = self.get_runtime(config.isolation)?;
+
         {
             let sessions = self.sessions.read().await;
             if sessions.len() >= self.config.max_sessions {
@@ -70,14 +98,14 @@ impl SandboxManager {
         }
 
         let session_id = format!("sb-{}", uuid::Uuid::new_v4());
-        let sandbox_id = self.runtime.create(&config).await?;
-        self.runtime.start(&sandbox_id).await?;
+        let sandbox_id = runtime.create(&config).await?;
+        runtime.start(&sandbox_id).await?;
 
-        let session = Session::new(sandbox_id, config.language);
+        let session = Session::new(sandbox_id, config.language, config.isolation);
 
         let mut sessions = self.sessions.write().await;
         sessions.insert(session_id.clone(), session);
-        info!("created session {session_id}");
+        info!("created session {session_id} (isolation={})", config.isolation);
 
         Ok(session_id)
     }
@@ -89,7 +117,7 @@ impl SandboxManager {
         code: &str,
         timeout: std::time::Duration,
     ) -> Result<ExecResult> {
-        let sandbox_id = {
+        let (sandbox_id, isolation) = {
             let mut sessions = self.sessions.write().await;
             let session = sessions
                 .get_mut(session_id)
@@ -106,15 +134,17 @@ impl SandboxManager {
             }
 
             session.touch();
-            session.sandbox_id.clone()
+            (session.sandbox_id.clone(), session.isolation)
         };
+
+        let runtime = self.get_runtime(isolation)?;
 
         let request = ExecRequest {
             code: code.to_string(),
             timeout,
         };
 
-        self.runtime.execute(&sandbox_id, &request).await
+        runtime.execute(&sandbox_id, &request).await
     }
 
     /// Upload a file from the host into a sandbox session.
@@ -156,10 +186,11 @@ impl SandboxManager {
             });
         }
 
-        let sandbox_id = self.get_active_sandbox_id(session_id).await?;
+        let (sandbox_id, isolation) = self.get_active_session_info(session_id).await?;
+        let runtime = self.get_runtime(isolation)?;
         let sandbox_dest = Path::new(sandbox_path);
 
-        self.runtime
+        runtime
             .upload_file(&sandbox_id, &canonical, sandbox_dest)
             .await
     }
@@ -205,11 +236,11 @@ impl SandboxManager {
             })?;
         }
 
-        let sandbox_id = self.get_active_sandbox_id(session_id).await?;
+        let (sandbox_id, isolation) = self.get_active_session_info(session_id).await?;
+        let runtime = self.get_runtime(isolation)?;
         let sandbox_src = Path::new(sandbox_path);
 
-        let bytes = self
-            .runtime
+        let bytes = runtime
             .download_file(&sandbox_id, sandbox_src, &host_dest)
             .await?;
 
@@ -234,8 +265,15 @@ impl SandboxManager {
                 .ok_or_else(|| SandcastleError::SessionNotFound(session_id.to_string()))?
         };
 
-        self.runtime.stop(&session.sandbox_id).await?;
-        self.runtime.destroy(&session.sandbox_id).await?;
+        let runtime = self.get_runtime(session.isolation)?;
+
+        // Always attempt destroy even if stop fails
+        if let Err(e) = runtime.stop(&session.sandbox_id).await {
+            warn!("failed to stop sandbox {}: {e}", session.sandbox_id);
+        }
+        if let Err(e) = runtime.destroy(&session.sandbox_id).await {
+            warn!("failed to destroy sandbox {}: {e}", session.sandbox_id);
+        }
         info!("destroyed session {session_id}");
         Ok(())
     }
@@ -245,12 +283,12 @@ impl SandboxManager {
         let timeout = self.config.session_timeout();
 
         // Collect expired session IDs under read lock
-        let expired: Vec<(String, SandboxId)> = {
+        let expired: Vec<(String, SandboxId, IsolationLevel)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
                 .filter(|(_, s)| s.last_active.elapsed() > timeout)
-                .map(|(id, s)| (id.clone(), s.sandbox_id.clone()))
+                .map(|(id, s)| (id.clone(), s.sandbox_id.clone(), s.isolation))
                 .collect()
         };
 
@@ -261,19 +299,21 @@ impl SandboxManager {
         // Remove from map under write lock
         {
             let mut sessions = self.sessions.write().await;
-            for (id, _) in &expired {
+            for (id, _, _) in &expired {
                 sessions.remove(id);
             }
         }
 
         // Destroy outside the lock
-        for (session_id, sandbox_id) in expired {
+        for (session_id, sandbox_id, isolation) in expired {
             info!("reaping expired session {session_id}");
-            if let Err(e) = self.runtime.stop(&sandbox_id).await {
-                warn!("failed to stop expired sandbox {sandbox_id}: {e}");
-            }
-            if let Err(e) = self.runtime.destroy(&sandbox_id).await {
-                warn!("failed to destroy expired sandbox {sandbox_id}: {e}");
+            if let Ok(runtime) = self.get_runtime(isolation) {
+                if let Err(e) = runtime.stop(&sandbox_id).await {
+                    warn!("failed to stop expired sandbox {sandbox_id}: {e}");
+                }
+                if let Err(e) = runtime.destroy(&sandbox_id).await {
+                    warn!("failed to destroy expired sandbox {sandbox_id}: {e}");
+                }
             }
         }
     }
@@ -284,8 +324,11 @@ impl SandboxManager {
         sessions.keys().cloned().collect()
     }
 
-    /// Helper: get sandbox_id for an active session.
-    async fn get_active_sandbox_id(&self, session_id: &str) -> Result<SandboxId> {
+    /// Helper: get sandbox_id and isolation for an active session.
+    async fn get_active_session_info(
+        &self,
+        session_id: &str,
+    ) -> Result<(SandboxId, IsolationLevel)> {
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(session_id)
@@ -302,7 +345,7 @@ impl SandboxManager {
         }
 
         session.touch();
-        Ok(session.sandbox_id.clone())
+        Ok((session.sandbox_id.clone(), session.isolation))
     }
 }
 
@@ -396,10 +439,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute_oneshot() {
         let runtime = Arc::new(MockRuntime::new());
-        let manager = SandboxManager::new(runtime, test_config());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
 
         let result = manager
-            .execute_oneshot("print('hi')", Language::Python, Duration::from_secs(5))
+            .execute_oneshot("print('hi')", Language::Python, IsolationLevel::Low, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -410,10 +453,11 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_execute_session() {
         let runtime = Arc::new(MockRuntime::new());
-        let manager = SandboxManager::new(runtime, test_config());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
 
         let config = SandboxConfig {
             language: Language::Python,
+            isolation: IsolationLevel::Low,
             limits: sandcastle_runtime::ResourceLimits::default(),
             env_vars: HashMap::new(),
         };
@@ -441,10 +485,11 @@ mod tests {
     #[tokio::test]
     async fn test_max_sessions_limit() {
         let runtime = Arc::new(MockRuntime::new());
-        let manager = SandboxManager::new(runtime, test_config());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
 
         let config = SandboxConfig {
             language: Language::Bash,
+            isolation: IsolationLevel::Low,
             limits: sandcastle_runtime::ResourceLimits::default(),
             env_vars: HashMap::new(),
         };
@@ -462,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_not_found() {
         let runtime = Arc::new(MockRuntime::new());
-        let manager = SandboxManager::new(runtime, test_config());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
 
         let err = manager
             .execute_in_session("nonexistent", "code", Duration::from_secs(5))
@@ -475,9 +520,23 @@ mod tests {
     #[tokio::test]
     async fn test_destroy_nonexistent() {
         let runtime = Arc::new(MockRuntime::new());
-        let manager = SandboxManager::new(runtime, test_config());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
 
         let err = manager.destroy_session("nonexistent").await.unwrap_err();
         assert!(matches!(err, SandcastleError::SessionNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_isolation() {
+        let runtime = Arc::new(MockRuntime::new());
+        let manager = SandboxManager::with_runtime(runtime, test_config());
+
+        // with_runtime registers only Low — Medium should fail
+        let err = manager
+            .execute_oneshot("code", Language::Python, IsolationLevel::Medium, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SandcastleError::UnsupportedIsolation(_)));
     }
 }

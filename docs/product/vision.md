@@ -167,8 +167,16 @@ Automated pipeline → agent generates and runs tests.
 - ✅ Persistent session lifecycle verified (create → multi-exec → destroy)
 - ✅ Comprehensive context_bank documentation for AI agent onboarding
 
-### Phase 3 — Tiered Isolation (gVisor + Firecracker)
-- Medium isolation backend (gVisor / runsc)
+### Phase 3 — gVisor Backend (Medium Isolation) ✅ Complete
+- ✅ Medium isolation backend (gVisor / runsc) with syscall interception
+- ✅ IsolationLevel enum (Low/Medium/High) with per-request routing
+- ✅ Manager refactored for multi-backend: HashMap<IsolationLevel, Runtime>
+- ✅ MCP tools accept `isolation` parameter (defaults to "low")
+- ✅ Graceful degradation when runsc not installed
+- ✅ 23 unit tests + 6 integration tests (including gVisor e2e)
+- ✅ runsc installed (release-20260406.0, ptrace platform)
+
+### Phase 4 — Firecracker + Advanced Isolation
 - High isolation backend (Firecracker microVM via KVM)
 - Pre-warmed sandbox pools per isolation level
 - Snapshot-based restore for Firecracker (fast wake)
@@ -176,7 +184,7 @@ Automated pipeline → agent generates and runs tests.
 - HTTP+SSE transport for remote agents
 - Pool management (target size, replenishment, idle timeout)
 
-### Phase 4 — Security Hardening
+### Phase 5 — Security Hardening
 - Malware scanning on file downloads (YARA rules + ClamAV)
 - File quarantine on malware detection
 - IP pinning for allowlisted domains (anti domain-fronting)
@@ -185,14 +193,14 @@ Automated pipeline → agent generates and runs tests.
 - Seccomp profile tuning per language runtime
 - Security benchmarks and penetration testing
 
-### Phase 5 — Scale & Monetization
+### Phase 6 — Scale & Monetization
 - Managed service (Sandcastle Cloud)
 - Usage-based billing per execution-second
 - Dashboard + analytics
 - More languages (Rust, Go, TypeScript)
 - API key management
 
-### Phase 6 — Enterprise
+### Phase 7 — Enterprise
 - SSO/SAML
 - Custom isolation policies
 - On-prem deployment assistance

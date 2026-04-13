@@ -6,6 +6,7 @@ members = [
     "crates/sandcastle-runtime",
     "crates/sandcastle-executor",
     "crates/sandcastle-process",
+    "crates/sandcastle-gvisor",
 ]
 
 [workspace.dependencies]

@@ -33,6 +33,7 @@ async fn test_python_hello_world() {
 
     let sandbox_config = SandboxConfig {
         language: Language::Python,
+        isolation: sandcastle_runtime::IsolationLevel::Low,
         limits: ResourceLimits::default(),
         env_vars: Default::default(),
     };

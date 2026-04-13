@@ -9,7 +9,9 @@ Coding standards, build commands, and workflow rules for this project.
 ### 1. No Shell Commands in Rust Host Code
 **NEVER** use `std::process::Command`, `Command::new()`, or any shell command execution in Rust code that runs on the host. Always use Rust crates for functionality.
 
-**Exception**: The executor binary (`sandcastle-executor`) runs INSIDE the sandbox and IS allowed to use `Command::new()` to spawn language runtimes. This is safe because it's already isolated.
+**Exceptions**:
+- The executor binary (`sandcastle-executor`) runs INSIDE the sandbox and IS allowed to use `Command::new()` to spawn language runtimes. This is safe because it's already isolated.
+- The `sandcastle-gvisor::runsc` module (`runsc.rs`) is allowed to use `tokio::process::Command` to invoke the `runsc` CLI. This is the only host-side exception — `runsc` has no Rust crate equivalent and must be called as a subprocess. No other module may spawn host commands.
 
 ### 2. Git Workflow — Always Use PRs
 - **Never push directly to `main`**. Always create a feature branch and raise a PR.

@@ -35,6 +35,10 @@ fn main() {
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
 
+    // Emit readiness signal so the host knows we're ready for commands
+    let _ = writeln!(stdout_lock, r#"{{"ready":true}}"#);
+    let _ = stdout_lock.flush();
+
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,

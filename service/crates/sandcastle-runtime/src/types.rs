@@ -18,6 +18,34 @@ impl From<String> for SandboxId {
     }
 }
 
+/// Isolation level for sandbox execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolationLevel {
+    /// Process-level isolation (Linux namespaces via libcontainer).
+    Low,
+    /// gVisor userspace kernel (runsc).
+    Medium,
+    /// Firecracker microVM (not yet implemented).
+    High,
+}
+
+impl Default for IsolationLevel {
+    fn default() -> Self {
+        Self::Low
+    }
+}
+
+impl std::fmt::Display for IsolationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IsolationLevel::Low => write!(f, "low"),
+            IsolationLevel::Medium => write!(f, "medium"),
+            IsolationLevel::High => write!(f, "high"),
+        }
+    }
+}
+
 /// Supported languages for code execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +89,8 @@ impl std::fmt::Display for Language {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     pub language: Language,
+    #[serde(default)]
+    pub isolation: IsolationLevel,
     pub limits: ResourceLimits,
     #[serde(default)]
     pub env_vars: HashMap<String, String>,
@@ -181,12 +211,36 @@ mod tests {
     fn test_sandbox_config_serde() {
         let config = SandboxConfig {
             language: Language::Javascript,
+            isolation: IsolationLevel::Medium,
             limits: ResourceLimits::default(),
             env_vars: HashMap::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.language, Language::Javascript);
+        assert_eq!(parsed.isolation, IsolationLevel::Medium);
+    }
+
+    #[test]
+    fn test_sandbox_config_default_isolation() {
+        let json = r#"{"language":"python","limits":{"memory_mb":512,"cpu_quota":100,"timeout":30,"max_pids":64,"max_disk_mb":512,"max_output_bytes":1048576}}"#;
+        let config: SandboxConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.isolation, IsolationLevel::Low);
+    }
+
+    #[test]
+    fn test_isolation_level_serde() {
+        let json = serde_json::to_string(&IsolationLevel::Medium).unwrap();
+        assert_eq!(json, "\"medium\"");
+        let parsed: IsolationLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, IsolationLevel::Medium);
+    }
+
+    #[test]
+    fn test_isolation_level_display() {
+        assert_eq!(IsolationLevel::Low.to_string(), "low");
+        assert_eq!(IsolationLevel::Medium.to_string(), "medium");
+        assert_eq!(IsolationLevel::High.to_string(), "high");
     }
 
     #[test]

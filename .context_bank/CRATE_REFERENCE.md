@@ -19,9 +19,13 @@ pub struct SandboxId(pub String);
 // Supported languages
 pub enum Language { Python, Javascript, Bash }
 
+// Isolation levels for tiered sandbox backends
+pub enum IsolationLevel { Low, Medium, High }
+
 // Configuration for creating a sandbox
 pub struct SandboxConfig {
     pub language: Language,
+    pub isolation: IsolationLevel,
     pub limits: ResourceLimits,
     pub env_vars: HashMap<String, String>,
 }
@@ -90,11 +94,12 @@ pub enum SandcastleError {
     RuntimeError(String),
     InvalidParams(String),        // -32602
     UnknownTool(String),          // -32602
+    UnsupportedIsolation(String),
     UnsupportedLanguage(String),
 }
 ```
 
-**Tests**: 9 unit tests in `types.rs` (serde roundtrips, defaults, display impls)
+**Tests**: 12 unit tests in `types.rs` (serde roundtrips, defaults, display impls, isolation levels)
 
 ---
 
@@ -151,12 +156,13 @@ struct ExecResponse {
 
 ```rust
 pub struct SandboxManager {
-    // Holds Arc<dyn SandboxRuntime> + sessions map + config
+    // Holds HashMap<IsolationLevel, Arc<dyn SandboxRuntime>> + sessions map + config
 }
 
 impl SandboxManager {
-    pub fn new(runtime: Arc<dyn SandboxRuntime>, config: ManagerConfig) -> Self;
-    pub async fn execute_oneshot(&self, code: &str, language: Language, timeout: Duration) -> Result<ExecResult>;
+    pub fn new(runtimes: HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>, config: ManagerConfig) -> Self;
+    pub fn with_runtime(runtime: Arc<dyn SandboxRuntime>, config: ManagerConfig) -> Self; // single-backend compat
+    pub async fn execute_oneshot(&self, code: &str, language: Language, isolation: IsolationLevel, timeout: Duration) -> Result<ExecResult>;
     pub async fn create_session(&self, config: SandboxConfig) -> Result<String>;
     pub async fn execute_in_session(&self, session_id: &str, code: &str, timeout: Duration) -> Result<ExecResult>;
     pub async fn upload(&self, session_id: &str, host_path: &Path, sandbox_path: &str) -> Result<u64>;
@@ -166,6 +172,10 @@ impl SandboxManager {
     pub async fn list_sessions(&self) -> Vec<String>;
 }
 ```
+
+### Multi-Backend Routing
+
+Sessions store their `IsolationLevel` so subsequent calls (execute, upload, download, destroy) route to the correct backend automatically. `create_session()` and `execute_oneshot()` look up the runtime by isolation level and return `UnsupportedIsolation` if no backend is registered for that level.
 
 ### Configuration
 
@@ -192,7 +202,7 @@ pub struct FileConfig {
 - **Session limits**: Max concurrent sessions enforced
 - **Auto-expiry**: Background task reaps idle sessions
 
-**Tests**: 5 unit tests with MockRuntime (oneshot, create+execute, max sessions, not found, destroy nonexistent)
+**Tests**: 6 unit tests with MockRuntime (oneshot, create+execute, max sessions, not found, destroy nonexistent, unsupported isolation)
 
 ---
 
@@ -268,6 +278,93 @@ destroy() → Container::delete(force) + cleanup dirs
 
 ---
 
+## sandcastle-gvisor
+
+**Role**: gVisor container backend using `runsc` CLI. Implements `SandboxRuntime` trait for medium isolation. Provides syscall-level interception via gVisor's Sentry.
+
+**Path**: `service/crates/sandcastle-gvisor/`
+
+### Configuration
+
+```rust
+pub struct GvisorConfig {
+    pub runsc_path: PathBuf,      // /usr/local/bin/runsc
+    pub rootfs_dir: PathBuf,      // /var/lib/sandcastle/rootfs
+    pub state_dir: PathBuf,       // /run/sandcastle/gvisor
+    pub bundle_dir: PathBuf,      // /var/lib/sandcastle/gvisor/bundles
+    pub workspace_dir: PathBuf,   // /var/lib/sandcastle/gvisor/workspaces
+    pub executor_path: PathBuf,   // /var/lib/sandcastle/bin/executor
+    pub platform: String,         // "ptrace" (default, no KVM needed)
+}
+```
+
+### Module Structure
+
+| Module | Purpose | Uses Command::new? |
+|--------|---------|--------------------|
+| `config.rs` | GvisorConfig with defaults | No |
+| `oci.rs` | OCI spec generation (5 namespaces) | No |
+| `runsc.rs` | All runsc CLI interactions | **Yes** (approved exception) |
+| `sandbox.rs` | GvisorSandbox implementing SandboxRuntime | No |
+
+### Key Dependencies
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| sandcastle-runtime | workspace | SandboxRuntime trait, types |
+| tokio | workspace | Async subprocess management |
+| serde_json | workspace | OCI spec serialization |
+| uuid | workspace | Container ID generation |
+
+### Internal Architecture
+
+```
+GvisorSandbox {
+    config: GvisorConfig,
+    containers: RwLock<HashMap<String, ContainerHandle>>
+}
+
+ContainerHandle {
+    child: Option<Child>,              // tokio::process::Child (None before start)
+    stdin: Option<ChildStdin>,         // Persistent write pipe to executor
+    stdout: Option<BufReader<ChildStdout>>,  // Persistent buffered read pipe
+    language: Language,
+    bundle_dir: PathBuf,
+    workspace_dir: PathBuf,
+    container_id: String,
+    exec_lock: Arc<Mutex<()>>,   // Serializes concurrent execute calls
+}
+```
+
+### Container Lifecycle (runsc CLI)
+
+```
+create() → prepare OCI bundle + rootfs symlink + workspace dir (chmod 777)
+  ↓
+start() → tokio::process::Command::new("runsc").arg("run") + wait for {"ready":true} from executor
+  ↓
+execute() → write JSON to persistent stdin → read JSON from persistent stdout (with timeout)
+  ↓ (can call execute() multiple times)
+stop() → runsc kill SIGKILL + child.kill() + child.wait() (prevent zombies)
+  ↓
+destroy() → runsc delete --force + remove bundle + workspace dirs
+```
+
+### OCI Spec Differences from ProcessSandbox
+
+| Feature | ProcessSandbox | GvisorSandbox |
+|---------|---------------|---------------|
+| OCI version | 1.0.2 | 1.0.2 |
+| Namespaces | PID, Mount | PID, Mount, IPC, UTS, Network |
+| Root path | Absolute path to rootfs | Absolute path to rootfs |
+| /dev | tmpfs mount | tmpfs mount |
+| Container runtime | libcontainer (in-process) | runsc CLI (subprocess) |
+| ID prefix | `sc-` | `gv-` |
+
+**Tests**: 1 unit test (OCI spec) + 1 e2e integration test (Python execution in gVisor, requires root + runsc)
+
+---
+
 ## sandcastle-server
 
 **Role**: MCP server entry point. Exposes sandbox operations as MCP tools via the `rmcp` crate.
@@ -288,8 +385,8 @@ Defined in `tools.rs` using rmcp's `#[tool]` macro:
 
 | Method | Handler | Params |
 |--------|---------|--------|
-| `execute_code` | `SandcastleTools::execute_code()` | `{code, language?, timeout_seconds?}` |
-| `create_sandbox` | `SandcastleTools::create_sandbox()` | `{language?, memory_mb?, timeout_seconds?}` |
+| `execute_code` | `SandcastleTools::execute_code()` | `{code, language?, timeout_seconds?, isolation?}` |
+| `create_sandbox` | `SandcastleTools::create_sandbox()` | `{language?, memory_mb?, timeout_seconds?, isolation?}` |
 | `execute_in_session` | `SandcastleTools::execute_in_session()` | `{session_id, code, timeout_seconds?}` |
 | `upload_file` | `SandcastleTools::upload_file()` | `{session_id, host_path, sandbox_path}` |
 | `download_file` | `SandcastleTools::download_file()` | `{session_id, sandbox_path, host_path?}` |
@@ -301,12 +398,14 @@ Defined in `tools.rs` using rmcp's `#[tool]` macro:
 main():
   1. Initialize tracing (stderr, env filter)
   2. Parse CLI args
-  3. Create ProcessConfig (defaults) + ProcessSandbox
-  4. Create ManagerConfig + SandboxManager
-  5. Spawn reaper background task (runs every 5s)
-  6. Create SandcastleTools(manager)
-  7. Start rmcp stdio transport
-  8. Block on server.waiting()
+  3. Create ProcessConfig + ProcessSandbox → register at IsolationLevel::Low
+  4. Check if runsc available → if yes, create GvisorConfig + GvisorSandbox → register at IsolationLevel::Medium
+  5. Build HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>
+  6. Create ManagerConfig + SandboxManager with runtime map
+  7. Spawn reaper background task (runs every 5s)
+  8. Create SandcastleTools(manager)
+  9. Start rmcp stdio transport
+  10. Block on server.waiting()
 ```
 
 ### Key Dependencies

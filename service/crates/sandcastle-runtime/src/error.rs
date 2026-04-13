@@ -54,13 +54,17 @@ pub enum SandcastleError {
     // Language errors
     #[error("unsupported language: {0}")]
     UnsupportedLanguage(String),
+
+    // Isolation errors
+    #[error("unsupported isolation level: {0} (backend not available)")]
+    UnsupportedIsolation(String),
 }
 
 impl SandcastleError {
     /// Map to MCP JSON-RPC error code.
     pub fn error_code(&self) -> i32 {
         match self {
-            Self::InvalidParams(_) | Self::UnknownTool(_) => -32602,
+            Self::InvalidParams(_) | Self::UnknownTool(_) | Self::UnsupportedIsolation(_) => -32602,
             Self::SessionNotFound(_) => -1,
             Self::MaxSessionsReached(_) | Self::FileTooLarge { .. } => -2,
             Self::SessionExpired(_) => -3,
