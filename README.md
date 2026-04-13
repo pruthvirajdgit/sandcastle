@@ -38,6 +38,16 @@ Sandcastle solves this by providing **sandboxed execution as an MCP tool**. Any 
 
 ## Demo
 
+### MCP Tools on Agent Dashboard
+
+<!-- Replace with screenshot of the MCP tool configs as seen on the agent dashboard -->
+![MCP Tools Dashboard](docs/images/mcp-tools-dashboard.png)
+
+### Live Demo — All 3 Isolation Levels
+
+<!-- Replace with a GIF showing live execution across low, medium, and high isolation -->
+![Live Demo](docs/images/live-demo.gif)
+
 ### One-shot execution (ephemeral sandbox)
 ```
 You: "Run print('hello from sandcastle') in python using low isolation"
