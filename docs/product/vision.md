@@ -186,14 +186,18 @@ Automated pipeline → agent generates and runs tests.
 - ✅ 27 unit tests + 7 integration tests (including Firecracker e2e)
 - ✅ Firecracker v1.12.0 + KVM on Azure VM
 
-### Phase 5 — Performance & Networking
-- Pre-warmed sandbox pools per isolation level
-- Snapshot-based restore for Firecracker (fast wake)
-- Network allowlisting with DNS proxy
-- HTTP+SSE transport for remote agents
-- Pool management (target size, replenishment, idle timeout)
+### Phase 5 — Pre-warmed Pools & Network Allowlisting
+- Pre-warmed sandbox pools per isolation level (low, medium, high)
+- Pool management: configurable target size, async replenishment, idle timeout eviction
+- Pool metrics: warm count, cold-start rate, replenishment latency
+- Snapshot-based restore for Firecracker (boot from memory snapshot instead of full boot)
+- Network allowlisting per sandbox (allowed_domains list in execute_code/create_sandbox)
+- DNS proxy for domain-level filtering (resolve → iptables allow specific IPs)
+- Network namespace isolation with nftables/iptables rules
+- Network-zero enforcement as default (no egress unless explicitly allowed)
 
-### Phase 6 — Security Hardening
+### Phase 6 — Transport & Security Hardening
+- HTTP+SSE transport for remote agents (multi-client, session management)
 - Malware scanning on file downloads (YARA rules + ClamAV)
 - File quarantine on malware detection
 - IP pinning for allowlisted domains (anti domain-fronting)
@@ -202,14 +206,14 @@ Automated pipeline → agent generates and runs tests.
 - Seccomp profile tuning per language runtime
 - Security benchmarks and penetration testing
 
-### Phase 6 — Scale & Monetization
+### Phase 7 — Scale & Monetization
 - Managed service (Sandcastle Cloud)
 - Usage-based billing per execution-second
 - Dashboard + analytics
 - More languages (Rust, Go, TypeScript)
 - API key management
 
-### Phase 7 — Enterprise
+### Phase 8 — Enterprise
 - SSO/SAML
 - Custom isolation policies
 - On-prem deployment assistance
