@@ -29,8 +29,13 @@ Sandcastle follows a **layered architecture** with clean separation between prot
 │  Linux namespace containers via libcontainer (youki)      │   gVisor containers via runsc CLI           │
 │  OCI spec: PID + Mount namespaces                         │   OCI spec: PID + Mount + IPC + UTS + Net  │
 │  Pipe-based I/O, container lifecycle                      │   Pipe-based I/O via `runsc run`           │
+├───────────────────────────────────────────────────────────┤
+│  sandcastle-firecracker  (High isolation)                 │
+│  Firecracker microVM via firepilot crate                  │
+│  Full hardware virtualization (KVM)                       │
+│  Vsock-based I/O to executor inside VM                    │
 └────────────────────────┬──────────────────────────────────┘
-                         │ Pipes (stdin/stdout)
+                         │ Pipes (stdin/stdout) or Vsock
 ┌────────────────────────▼──────────────────────────────────┐
 │  sandcastle-executor                                      │
 │  Runs INSIDE the container as PID 1                       │
@@ -49,6 +54,8 @@ sandcastle-server
   ├── sandcastle-process
   │     └── sandcastle-runtime
   ├── sandcastle-gvisor
+  │     └── sandcastle-runtime
+  ├── sandcastle-firecracker
   │     └── sandcastle-runtime
   └── sandcastle-runtime
 
@@ -109,7 +116,7 @@ The manager routes requests to the correct backend based on `IsolationLevel`:
 |-------|---------|-----------|------------|-------------------|
 | Low | ProcessSandbox | `sc-` | PID + Mount | libcontainer (youki) |
 | Medium | GvisorSandbox | `gv-` | PID + Mount + IPC + UTS + Net | runsc (gVisor) |
-| High | (Phase 4) | — | Full VM | Firecracker |
+| High | FirecrackerSandbox | `fc-` | Full VM (KVM) | Firecracker (firepilot) |
 
 Default isolation is **Low**. Agents choose isolation per-request via the `isolation` parameter.
 
@@ -164,6 +171,31 @@ gVisor intercepts all syscalls at the kernel boundary, providing stronger isolat
 | Hostname       | UTS namespace                | Isolated hostname                 |
 
 gVisor uses the `ptrace` platform (no KVM required — works on any VM). runsc state lives in `/run/sandcastle/gvisor` (separate from libcontainer's `/run/sandcastle`).
+
+### FirecrackerSandbox Isolation (High)
+
+Firecracker provides full hardware virtualization via KVM — the strongest isolation level:
+
+| Resource       | Isolation Mechanism          | Details                           |
+|----------------|------------------------------|-----------------------------------|
+| CPU/Memory     | Dedicated vCPU + RAM         | Separate VM with own kernel       |
+| Syscalls       | Own kernel (vmlinux 6.1)     | Guest has its own Linux kernel    |
+| Filesystem     | ext4 block device            | Separate root filesystem image    |
+| Network        | None (no TAP device)         | Complete network isolation        |
+| Processes      | Own PID namespace + kernel   | Full VM-level isolation           |
+
+Communication between host and VM uses **vsock** (Firecracker's virtio-socket UDS proxy):
+- Host connects to a Unix domain socket, sends `CONNECT <port>\n`
+- Firecracker forwards to guest vsock port 5000
+- Executor inside VM listens on vsock, speaks same JSON protocol
+- File transfer uses base64-encoded upload/download commands over vsock
+
+Key components:
+- **firepilot crate**: Manages Firecracker VM lifecycle (create, start, kill)
+- **vsock module**: Host-side vsock UDS proxy client with retry logic
+- **Dual-mode executor**: Detects `--vsock` flag, listens on vsock instead of stdin
+- **Ext4 rootfs**: Block device images built from Docker-exported directories
+- Container IDs prefixed `fc-` (vs `sc-` for ProcessSandbox, `gv-` for GvisorSandbox)
 
 Key differences from ProcessSandbox:
 - **5 namespaces** (pid, mount, ipc, uts, network) vs 2 (pid, mount)
@@ -239,7 +271,7 @@ The executor binary (`/sandbox/executor`) is copied into each rootfs. It MUST be
 |---------|-------|--------|-----------------|
 | Linux namespaces (libcontainer) | sandcastle-process | ✅ Working (Phase 1 & 2) | Low |
 | gVisor (runsc) | sandcastle-gvisor | ✅ Working (Phase 3) | Medium |
-| Firecracker (microVM) | sandcastle-firecracker | ⬜ Phase 4 | High |
+| Firecracker (microVM) | sandcastle-firecracker | ✅ Working (Phase 4) | High |
 
 All backends implement the same `SandboxRuntime` trait. The manager and server are backend-agnostic.
 

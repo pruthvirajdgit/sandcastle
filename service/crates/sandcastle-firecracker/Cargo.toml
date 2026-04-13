@@ -1,0 +1,20 @@
+[package]
+name = "sandcastle-firecracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sandcastle-runtime = { path = "../sandcastle-runtime" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+firepilot = "1.2.0"
+firepilot_models = "1.3.0"
+hyper = { version = "0.14", features = ["client", "http1"] }
+hyperlocal = "0.8"
+
+[dev-dependencies]
+nix = { version = "0.30", features = ["user"] }

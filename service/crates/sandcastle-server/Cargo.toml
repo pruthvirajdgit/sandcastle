@@ -13,6 +13,7 @@ sandcastle-runtime = { path = "../sandcastle-runtime" }
 sandcastle-manager = { path = "../sandcastle-manager" }
 sandcastle-process = { path = "../sandcastle-process" }
 sandcastle-gvisor = { path = "../sandcastle-gvisor" }
+sandcastle-firecracker = { path = "../sandcastle-firecracker" }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -201,6 +201,26 @@ else
     echo "  ⚠️  SKIP: runsc not installed, skipping gVisor session test"
 fi
 
+# ---- Test 7: FirecrackerSandbox (high isolation) via MCP ----
+echo ""
+echo "--- Test 7: FirecrackerSandbox (high isolation) via execute_code ---"
+
+if [ -f /usr/local/bin/firecracker ] && [ -f /var/lib/sandcastle/kernel/vmlinux ] && [ -f /var/lib/sandcastle/rootfs/python.ext4 ]; then
+    EXEC_HIGH='{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"execute_code","arguments":{"code":"print(11*11)","language":"python","isolation":"high"}}}'
+
+    output=$(echo -e "$INIT_MSG\n$INITIALIZED_MSG\n$EXEC_HIGH" | timeout 30 "$SANDCASTLE_BIN" serve 2>/dev/null || true)
+
+    if echo "$output" | grep -q "121"; then
+        echo "  ✅ PASS: execute_code with isolation=high works (FirecrackerSandbox)"
+    else
+        echo "  ❌ FAIL: Expected '121' in output"
+        echo "  Output: $(echo "$output" | tail -3)"
+        exit 1
+    fi
+else
+    echo "  ⚠️  SKIP: firecracker/kernel/rootfs not available, skipping high isolation test"
+fi
+
 # ---- Summary ----
 echo ""
 echo "=== Integration tests complete ==="
