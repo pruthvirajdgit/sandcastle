@@ -188,8 +188,8 @@ Firecracker exposes guest vsock via a Unix domain socket. The host MUST follow t
 
 If you skip the CONNECT handshake, the connection silently fails.
 
-### 5. Each vsock connection is one-shot
-Every `execute()` call opens a new vsock connection (CONNECT → OK → JSON request → JSON response). The connection is NOT persistent across execute calls (unlike container pipes which stay open).
+### 5. Vsock connection is persistent per VM
+The host establishes the vsock connection after boot and reuses it across multiple `execute()` calls for the same VM/session. The `VsockConnection` is stored on the `VmHandle`, and the executor processes multiple newline-delimited JSON request/response messages over that single connection. Do not assume `execute()` creates a fresh CONNECT/OK handshake each time.
 
 ### 6. File transfer uses base64 over vsock
 Unlike containers where files are directly copied to the bind-mounted workspace directory, Firecracker VMs require file transfer over vsock using base64 encoding. This means:
@@ -211,8 +211,8 @@ ps aux | grep firecracker
 sudo kill <pid>
 
 # Clean up state directories
-sudo rm -rf /var/lib/sandcastle/firecracker/fc-*
-sudo rm -rf /tmp/sandcastle-fc-test*
+sudo rm -rf /run/sandcastle/firecracker/fc-*
+sudo rm -rf /var/lib/sandcastle/fc-workspaces/fc-*
 ```
 
 ---

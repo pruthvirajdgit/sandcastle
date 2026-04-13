@@ -87,6 +87,47 @@ impl FirecrackerSandbox {
         self.config.rootfs_dir.join(format!("{}.ext4", name))
     }
 
+    /// Configure machine resources (vCPU/memory) on a Firecracker instance via its API socket.
+    async fn configure_machine(
+        socket_path: &Path,
+        vcpu_count: u32,
+        memory_mb: u32,
+    ) -> Result<()> {
+        use hyper::{Body, Client, Method, Request};
+        use hyperlocal::{UnixClientExt, Uri};
+
+        let client = Client::unix();
+
+        let machine_config = serde_json::json!({
+            "vcpu_count": vcpu_count,
+            "mem_size_mib": memory_mb,
+        });
+
+        let url = Uri::new(socket_path, "/machine-config");
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(url)
+            .header("Content-Type", "application/json")
+            .body(Body::from(machine_config.to_string()))
+            .map_err(|e| SandcastleError::RuntimeError(
+                format!("failed to build machine config request: {}", e)
+            ))?;
+
+        let resp = client.request(req).await.map_err(|e| {
+            SandcastleError::RuntimeError(format!("failed to configure machine: {}", e))
+        })?;
+
+        if !resp.status().is_success() {
+            let body = hyper::body::to_bytes(resp.into_body()).await.unwrap_or_default();
+            return Err(SandcastleError::RuntimeError(
+                format!("machine config failed: {}", String::from_utf8_lossy(&body))
+            ));
+        }
+
+        debug!("machine configured: vcpu={}, memory={}MB", vcpu_count, memory_mb);
+        Ok(())
+    }
+
     /// Configure vsock on a running Firecracker instance via its API socket.
     async fn configure_vsock(
         socket_path: &Path,
@@ -132,7 +173,7 @@ impl FirecrackerSandbox {
 #[async_trait]
 impl SandboxRuntime for FirecrackerSandbox {
     async fn create(&self, config: &SandboxConfig) -> Result<SandboxId> {
-        let sandbox_id = format!("fc-{}", uuid::Uuid::new_v4());
+        let sandbox_id = format!("fc-{}", uuid::Uuid::new_v4().simple());
         let vm_id = sandbox_id.clone();
         let guest_cid = self.next_cid();
 
@@ -238,20 +279,38 @@ impl SandboxRuntime for FirecrackerSandbox {
         // Get the API socket path (firepilot creates it during machine.create())
         let socket_path = self.config.state_dir.join(&vm_id).join("firecracker.socket");
 
+        // Configure machine resources (vCPU/memory) via Firecracker API
+        Self::configure_machine(&socket_path, self.config.vcpu_count, self.config.memory_mb).await?;
+
         // Configure vsock before starting the VM
         Self::configure_vsock(&socket_path, guest_cid, &vsock_uds_path).await?;
 
-        // Start the VM
-        {
+        // Start the VM without holding the global lock across .await
+        let machine = {
             let mut vms = self.vms.write().await;
             let handle = vms.get_mut(&id.0).ok_or_else(|| {
                 SandcastleError::RuntimeError(format!("VM {} not found", id.0))
             })?;
-            handle.machine.start().await.map_err(|e| {
-                SandcastleError::SandboxCreationFailed(format!("failed to start VM: {:?}", e))
-            })?;
-            handle.started = true;
+            // Temporarily take the machine out of the handle
+            std::mem::replace(&mut handle.machine, firepilot::machine::Machine::new())
+        };
+
+        let start_result = machine.start().await;
+
+        // Put the machine back regardless of result
+        {
+            let mut vms = self.vms.write().await;
+            if let Some(handle) = vms.get_mut(&id.0) {
+                handle.machine = machine;
+                if start_result.is_ok() {
+                    handle.started = true;
+                }
+            }
         }
+
+        start_result.map_err(|e| {
+            SandcastleError::SandboxCreationFailed(format!("failed to start VM: {:?}", e))
+        })?;
 
         // Connect to the executor via vsock with retry loop.
         // The VM needs time to boot and the executor needs to bind its vsock listener.
@@ -320,15 +379,28 @@ impl SandboxRuntime for FirecrackerSandbox {
         let timeout = request.timeout + std::time::Duration::from_secs(5);
 
         let response_line = {
-            let mut vms = self.vms.write().await;
-            let handle = vms.get_mut(&id.0).ok_or_else(|| {
-                SandcastleError::RuntimeError(format!("VM {} not found", id.0))
-            })?;
-            let vsock = handle.vsock.as_mut().ok_or_else(|| {
-                SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
-            })?;
+            // Take vsock connection briefly under write lock, then release
+            let mut vsock = {
+                let mut vms = self.vms.write().await;
+                let handle = vms.get_mut(&id.0).ok_or_else(|| {
+                    SandcastleError::RuntimeError(format!("VM {} not found", id.0))
+                })?;
+                handle.vsock.take().ok_or_else(|| {
+                    SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
+                })?
+            };
 
-            vsock.execute_json(&exec_cmd.to_string(), timeout).await?
+            let result = vsock.execute_json(&exec_cmd.to_string(), timeout).await;
+
+            // Put vsock connection back
+            {
+                let mut vms = self.vms.write().await;
+                if let Some(handle) = vms.get_mut(&id.0) {
+                    handle.vsock = Some(vsock);
+                }
+            }
+
+            result?
         };
 
         let result: ExecResult = serde_json::from_str(response_line.trim()).map_err(|e| {
@@ -343,20 +415,32 @@ impl SandboxRuntime for FirecrackerSandbox {
     }
 
     async fn stop(&self, id: &SandboxId) -> Result<()> {
-        let mut vms = self.vms.write().await;
-        let handle = vms.get_mut(&id.0).ok_or_else(|| {
-            SandcastleError::RuntimeError(format!("VM {} not found", id.0))
-        })?;
-
-        // Drop vsock connection
-        handle.vsock.take();
-
-        // Kill the VM
-        if handle.started {
-            if let Err(e) = handle.machine.kill().await {
-                warn!("failed to kill VM {}: {:?}", id.0, e);
+        // Take machine out under brief lock, then operate without lock
+        let machine_opt = {
+            let mut vms = self.vms.write().await;
+            let handle = vms.get_mut(&id.0).ok_or_else(|| {
+                SandcastleError::RuntimeError(format!("VM {} not found", id.0))
+            })?;
+            // Drop vsock connection
+            handle.vsock.take();
+            if handle.started {
+                handle.started = false;
+                Some(std::mem::replace(&mut handle.machine, firepilot::machine::Machine::new()))
+            } else {
+                None
             }
-            handle.started = false;
+        };
+
+        // Perform the async operation without holding the lock
+        if let Some(mut machine) = machine_opt {
+            if let Err(e) = machine.kill().await {
+                warn!("failed to stop VM {}: {:?}", id.0, e);
+            }
+            // Put machine back
+            let mut vms = self.vms.write().await;
+            if let Some(handle) = vms.get_mut(&id.0) {
+                handle.machine = machine;
+            }
         }
 
         info!("stopped Firecracker VM {}", id.0);
@@ -426,17 +510,29 @@ impl SandboxRuntime for FirecrackerSandbox {
         let _guard = exec_lock.lock().await;
 
         let response_line = {
-            let mut vms = self.vms.write().await;
-            let handle = vms.get_mut(&id.0).ok_or_else(|| {
-                SandcastleError::RuntimeError(format!("VM {} not found", id.0))
-            })?;
-            let vsock = handle.vsock.as_mut().ok_or_else(|| {
-                SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
-            })?;
-            vsock.execute_json(
+            let mut vsock = {
+                let mut vms = self.vms.write().await;
+                let handle = vms.get_mut(&id.0).ok_or_else(|| {
+                    SandcastleError::RuntimeError(format!("VM {} not found", id.0))
+                })?;
+                handle.vsock.take().ok_or_else(|| {
+                    SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
+                })?
+            };
+
+            let result = vsock.execute_json(
                 &upload_cmd.to_string(),
                 std::time::Duration::from_secs(30),
-            ).await?
+            ).await;
+
+            {
+                let mut vms = self.vms.write().await;
+                if let Some(handle) = vms.get_mut(&id.0) {
+                    handle.vsock = Some(vsock);
+                }
+            }
+
+            result?
         };
 
         let resp: serde_json::Value = serde_json::from_str(response_line.trim()).map_err(|e| {
@@ -479,17 +575,29 @@ impl SandboxRuntime for FirecrackerSandbox {
         let _guard = exec_lock.lock().await;
 
         let response_line = {
-            let mut vms = self.vms.write().await;
-            let handle = vms.get_mut(&id.0).ok_or_else(|| {
-                SandcastleError::RuntimeError(format!("VM {} not found", id.0))
-            })?;
-            let vsock = handle.vsock.as_mut().ok_or_else(|| {
-                SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
-            })?;
-            vsock.execute_json(
+            let mut vsock = {
+                let mut vms = self.vms.write().await;
+                let handle = vms.get_mut(&id.0).ok_or_else(|| {
+                    SandcastleError::RuntimeError(format!("VM {} not found", id.0))
+                })?;
+                handle.vsock.take().ok_or_else(|| {
+                    SandcastleError::RuntimeError("VM not started (no vsock connection)".to_string())
+                })?
+            };
+
+            let result = vsock.execute_json(
                 &download_cmd.to_string(),
                 std::time::Duration::from_secs(30),
-            ).await?
+            ).await;
+
+            {
+                let mut vms = self.vms.write().await;
+                if let Some(handle) = vms.get_mut(&id.0) {
+                    handle.vsock = Some(vsock);
+                }
+            }
+
+            result?
         };
 
         let resp: serde_json::Value = serde_json::from_str(response_line.trim()).map_err(|e| {

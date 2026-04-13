@@ -192,9 +192,12 @@ fn handle_upload(cmd: &ExecCommand) -> ExecResponse {
         };
     }
 
-    // Sanitize path — no absolute or traversal
+    // Sanitize path — reject absolute paths and traversal via components
     let rel = Path::new(&cmd.path);
-    if rel.is_absolute() || cmd.path.contains("..") {
+    let has_traversal = rel.components().any(|c| matches!(c,
+        std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+    ));
+    if rel.is_absolute() || has_traversal {
         return ExecResponse {
             stdout: String::new(),
             stderr: "executor: invalid path".to_string(),
@@ -261,7 +264,10 @@ fn handle_download(cmd: &ExecCommand) -> ExecResponse {
     }
 
     let rel = Path::new(&cmd.path);
-    if rel.is_absolute() || cmd.path.contains("..") {
+    let has_traversal = rel.components().any(|c| matches!(c,
+        std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+    ));
+    if rel.is_absolute() || has_traversal {
         return ExecResponse {
             stdout: String::new(),
             stderr: "executor: invalid path".to_string(),

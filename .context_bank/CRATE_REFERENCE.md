@@ -131,18 +131,17 @@ struct ExecCommand {
     timeout_ms: u64,       // Max execution time (exec only)
     max_output_bytes: u64, // Output truncation limit (exec only)
     path: String,          // Sandbox path (upload/download only)
-    data: String,          // Base64-encoded file data (upload only)
+    content_base64: String, // Base64-encoded file data (upload only)
 }
 
 // Sent to host (JSON line)
 struct ExecResponse {
-    stdout: String,
+    stdout: String,        // For downloads: base64-encoded file content
     stderr: String,
     exit_code: i32,        // -1 for internal errors, 124 for timeout, 137 for OOM
     execution_time_ms: u64,
     timed_out: bool,
     oom_killed: bool,
-    data: Option<String>,  // Base64-encoded file data (download only)
 }
 ```
 
@@ -392,8 +391,8 @@ pub struct FirecrackerConfig {
     pub firecracker_path: PathBuf,  // /usr/local/bin/firecracker
     pub kernel_path: PathBuf,       // /var/lib/sandcastle/kernel/vmlinux
     pub rootfs_dir: PathBuf,        // /var/lib/sandcastle/rootfs (ext4 images)
-    pub state_dir: PathBuf,         // /var/lib/sandcastle/firecracker (VM state)
-    pub workspace_dir: PathBuf,     // /var/lib/sandcastle/firecracker/workspaces
+    pub state_dir: PathBuf,         // /run/sandcastle/firecracker (VM state)
+    pub workspace_dir: PathBuf,     // /var/lib/sandcastle/fc-workspaces
     pub guest_cid_base: u32,        // 100 (vsock CID base, incremented per VM)
     pub vsock_port: u32,            // 5000 (port executor listens on inside VM)
     pub memory_mb: u32,             // 256 (VM memory)
@@ -417,9 +416,8 @@ Note: The `firepilot` crate internally spawns the Firecracker binary — this is
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | firepilot | 1.2.0 | Firecracker VM lifecycle (create, start, kill) |
-| hyper | 1 | HTTP client for Firecracker REST API (vsock config) |
-| hyperlocal | 0.9 | Unix socket HTTP transport for Firecracker API |
-| http-body-util | 0.1 | HTTP body utilities for API requests |
+| hyper | 0.14 | HTTP client for Firecracker REST API (vsock config) |
+| hyperlocal | 0.8 | Unix socket HTTP transport for Firecracker API |
 | tokio | workspace | Async runtime, Unix streams, timers |
 | sandcastle-runtime | workspace | SandboxRuntime trait, types |
 
@@ -461,7 +459,7 @@ destroy() → cleanup state dirs + workspace
 ### Vsock Communication Protocol
 
 Firecracker exposes guest vsock via a Unix domain socket (UDS proxy):
-1. Host connects to `<state_dir>/<vm_id>/firecracker-vsock.sock`
+1. Host connects to `{state_dir}/{sandbox_id}.vsock`
 2. Sends `CONNECT <port>\n` (e.g., `CONNECT 5000\n`)
 3. Firecracker responds with `OK <port>\n`
 4. Bidirectional stream established — JSON commands flow same as stdin/stdout
@@ -482,8 +480,8 @@ Key methods:
 ### File Transfer
 
 Unlike containers (where host filesystem is bind-mounted), VM filesystems are isolated:
-- **Upload**: Host reads file → base64 encode → JSON `{"action":"upload","path":"...","data":"..."}` over vsock
-- **Download**: JSON `{"action":"download","path":"..."}` over vsock → base64 decode → write to host
+- **Upload**: Host reads file → base64 encode → JSON `{"action":"upload","path":"...","content_base64":"..."}` over vsock
+- **Download**: JSON `{"action":"download","path":"..."}` over vsock → response stdout contains base64 data → decode → write to host
 - Path traversal protection: `sanitize_sandbox_path()` rejects `..` and absolute paths
 - Inline base64 encode/decode (no external crate)
 

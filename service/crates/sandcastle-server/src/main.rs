@@ -84,9 +84,18 @@ async fn main() -> anyhow::Result<()> {
             let fc_config = FirecrackerConfig::default();
             let fc_runtime = FirecrackerSandbox::new(fc_config);
             if fc_runtime.is_available() {
-                fc_runtime.ensure_dirs().expect("failed to create Firecracker runtime directories");
-                runtimes.insert(IsolationLevel::High, Arc::new(fc_runtime));
-                tracing::info!("registered backend: high (FirecrackerSandbox/Firecracker)");
+                match fc_runtime.ensure_dirs() {
+                    Ok(()) => {
+                        runtimes.insert(IsolationLevel::High, Arc::new(fc_runtime));
+                        tracing::info!("registered backend: high (FirecrackerSandbox/Firecracker)");
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to create Firecracker runtime directories — high isolation unavailable"
+                        );
+                    }
+                }
             } else {
                 tracing::warn!("firecracker or kernel not found — high isolation unavailable");
             }

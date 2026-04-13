@@ -17,6 +17,8 @@ pub struct FirecrackerConfig {
     /// Guest CID for vsock (must be >= 3).
     pub guest_cid_base: u32,
     /// Vsock port the executor listens on inside the VM.
+    /// Must match the VSOCK_PORT constant in sandcastle-executor (currently 5000).
+    /// Changing this requires rebuilding the executor with the matching port.
     pub vsock_port: u32,
     /// Memory size in MiB for each microVM.
     pub memory_mb: u32,
@@ -44,9 +46,18 @@ impl Default for FirecrackerConfig {
 }
 
 impl FirecrackerConfig {
-    /// Check if the Firecracker binary is available.
+    /// Check if the Firecracker runtime prerequisites are available.
     pub fn is_available(&self) -> bool {
-        self.firecracker_path.exists() && self.kernel_path.exists()
+        let kvm_path = std::path::PathBuf::from("/dev/kvm");
+
+        self.firecracker_path.exists()
+            && self.kernel_path.exists()
+            && kvm_path.exists()
+            && std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&kvm_path)
+                .is_ok()
     }
 }
 
