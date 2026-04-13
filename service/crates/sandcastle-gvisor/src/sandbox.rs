@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -17,8 +17,12 @@ use crate::config::GvisorConfig;
 
 /// State held for each active gVisor container.
 struct ContainerHandle {
-    /// The runsc child process.
-    child: Child,
+    /// The runsc child process (None before start()).
+    child: Option<Child>,
+    /// Persistent stdin writer to the executor.
+    stdin: Option<ChildStdin>,
+    /// Persistent buffered stdout reader from the executor.
+    stdout: Option<BufReader<ChildStdout>>,
     /// Language for this sandbox.
     language: Language,
     /// Path to the bundle directory.
@@ -168,13 +172,11 @@ impl SandboxRuntime for GvisorSandbox {
         }?;
 
         info!("gVisor sandbox {id} bundle prepared");
-        // Store placeholder — actual child is spawned in start()
+
         let handle = ContainerHandle {
-            child: tokio::process::Command::new("true")
-                .spawn()
-                .map_err(|e| {
-                    SandcastleError::SandboxCreationFailed(format!("placeholder spawn: {e}"))
-                })?,
+            child: None,
+            stdin: None,
+            stdout: None,
             language: config.language,
             bundle_dir,
             workspace_dir,
@@ -189,26 +191,80 @@ impl SandboxRuntime for GvisorSandbox {
     }
 
     async fn start(&self, id: &SandboxId) -> Result<()> {
-        let mut containers = self.containers.write().await;
-        let handle = containers.get_mut(&id.0).ok_or_else(|| {
-            SandcastleError::RuntimeError(format!("container {} not found", id.0))
-        })?;
+        // Extract what we need, then drop the lock before awaiting
+        let (bundle_dir, container_id) = {
+            let containers = self.containers.read().await;
+            let handle = containers.get(&id.0).ok_or_else(|| {
+                SandcastleError::RuntimeError(format!("container {} not found", id.0))
+            })?;
+            (handle.bundle_dir.clone(), handle.container_id.clone())
+        };
 
         // Spawn `runsc run` — this starts the container and connects stdin/stdout
-        let child = crate::runsc::spawn_run(
+        let mut child = crate::runsc::spawn_run(
             &self.config.runsc_path,
             &self.config.state_dir,
-            &handle.bundle_dir,
-            &handle.container_id,
+            &bundle_dir,
+            &container_id,
             &self.config.platform,
         )
         .await
         .map_err(SandcastleError::SandboxCreationFailed)?;
 
-        handle.child = child;
+        // Take ownership of stdin/stdout pipes
+        let stdin = child.stdin.take().ok_or_else(|| {
+            SandcastleError::SandboxCreationFailed("runsc child has no stdin".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            SandcastleError::SandboxCreationFailed("runsc child has no stdout".to_string())
+        })?;
+        let mut stdout_reader = BufReader::new(stdout);
 
-        // Wait briefly for the executor to be ready
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Wait for executor readiness handshake instead of fixed sleep
+        let mut ready_line = String::new();
+        let ready_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            stdout_reader.read_line(&mut ready_line),
+        )
+        .await;
+
+        match ready_result {
+            Ok(Ok(0)) => {
+                return Err(SandcastleError::SandboxCreationFailed(
+                    "executor closed stdout before sending ready signal".to_string(),
+                ));
+            }
+            Ok(Ok(_)) => {
+                let trimmed = ready_line.trim();
+                if !trimmed.contains("\"ready\"") {
+                    return Err(SandcastleError::SandboxCreationFailed(format!(
+                        "unexpected executor startup message: {trimmed}"
+                    )));
+                }
+                debug!("gVisor executor ready for container {}", id.0);
+            }
+            Ok(Err(e)) => {
+                return Err(SandcastleError::SandboxCreationFailed(format!(
+                    "error reading executor ready signal: {e}"
+                )));
+            }
+            Err(_) => {
+                return Err(SandcastleError::SandboxCreationFailed(
+                    "timeout waiting for executor ready signal (10s)".to_string(),
+                ));
+            }
+        }
+
+        // Now store child + pipes in the handle
+        {
+            let mut containers = self.containers.write().await;
+            let handle = containers.get_mut(&id.0).ok_or_else(|| {
+                SandcastleError::RuntimeError(format!("container {} not found", id.0))
+            })?;
+            handle.child = Some(child);
+            handle.stdin = Some(stdin);
+            handle.stdout = Some(stdout_reader);
+        }
 
         info!("gVisor sandbox {} started", id.0);
         Ok(())
@@ -236,9 +292,9 @@ impl SandboxRuntime for GvisorSandbox {
             .map_err(|e| SandcastleError::ExecutionFailed(format!("serialize command: {e}")))?;
         command_line.push('\n');
 
-        // Write to stdin
-        let stdin = handle.child.stdin.as_mut().ok_or_else(|| {
-            SandcastleError::ExecutionFailed("stdin not available".to_string())
+        // Write to persistent stdin
+        let stdin = handle.stdin.as_mut().ok_or_else(|| {
+            SandcastleError::ExecutionFailed("stdin not available (container not started?)".to_string())
         })?;
 
         stdin
@@ -252,12 +308,11 @@ impl SandboxRuntime for GvisorSandbox {
 
         debug!("sent exec command to gVisor container {}", id.0);
 
-        // Read response from stdout
-        let stdout = handle.child.stdout.as_mut().ok_or_else(|| {
-            SandcastleError::ExecutionFailed("stdout not available".to_string())
+        // Read response from persistent stdout reader
+        let reader = handle.stdout.as_mut().ok_or_else(|| {
+            SandcastleError::ExecutionFailed("stdout not available (container not started?)".to_string())
         })?;
 
-        let mut reader = BufReader::new(stdout);
         let mut response_line = String::new();
 
         // Read with timeout
@@ -307,8 +362,10 @@ impl SandboxRuntime for GvisorSandbox {
         // Also kill and wait on the child process to avoid zombies
         let mut containers = self.containers.write().await;
         if let Some(handle) = containers.get_mut(&id.0) {
-            let _ = handle.child.kill().await;
-            let _ = handle.child.wait().await;
+            if let Some(ref mut child) = handle.child {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
         }
 
         info!("gVisor sandbox {} stopped", id.0);
@@ -363,7 +420,9 @@ impl SandboxRuntime for GvisorSandbox {
             SandcastleError::RuntimeError(format!("container {} not found", id.0))
         })?;
 
-        let dest = handle.workspace_dir.join(sandbox_path);
+        let safe_relative = sanitize_sandbox_path(sandbox_path)?;
+        let dest = handle.workspace_dir.join(safe_relative);
+
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 SandcastleError::RuntimeError(format!("create parent dir: {e}"))
@@ -394,7 +453,9 @@ impl SandboxRuntime for GvisorSandbox {
             SandcastleError::RuntimeError(format!("container {} not found", id.0))
         })?;
 
-        let src = handle.workspace_dir.join(sandbox_path);
+        let safe_relative = sanitize_sandbox_path(sandbox_path)?;
+        let src = handle.workspace_dir.join(safe_relative);
+
         if !src.exists() {
             return Err(SandcastleError::FileNotFound(src));
         }
@@ -419,11 +480,69 @@ impl SandboxRuntime for GvisorSandbox {
     }
 
     async fn status(&self, id: &SandboxId) -> Result<SandboxStatus> {
-        let containers = self.containers.read().await;
-        if containers.contains_key(&id.0) {
-            Ok(SandboxStatus::Running)
+        let mut containers = self.containers.write().await;
+        let Some(handle) = containers.get_mut(&id.0) else {
+            return Ok(SandboxStatus::Stopped);
+        };
+
+        // Check if the child process is still running
+        if let Some(ref mut child) = handle.child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    warn!(
+                        "gVisor container {} process exited with status {}",
+                        id.0, status
+                    );
+                    Ok(SandboxStatus::Failed(format!("process exited: {status}")))
+                }
+                Ok(None) => Ok(SandboxStatus::Running),
+                Err(e) => {
+                    warn!("failed to check gVisor container {} status: {e}", id.0);
+                    Ok(SandboxStatus::Running)
+                }
+            }
         } else {
-            Ok(SandboxStatus::Stopped)
+            // No child yet — container created but not started
+            Ok(SandboxStatus::Created)
         }
     }
+}
+
+/// Sanitize a sandbox path to prevent path traversal attacks.
+/// Strips `/workspace` prefix if present, rejects absolute paths and `..` components.
+fn sanitize_sandbox_path(sandbox_path: &Path) -> Result<&Path> {
+    // Strip /workspace prefix if present
+    let relative = sandbox_path
+        .strip_prefix("/workspace")
+        .or_else(|_| sandbox_path.strip_prefix("workspace"))
+        .unwrap_or(sandbox_path);
+
+    // Reject absolute paths
+    if relative.is_absolute() {
+        return Err(SandcastleError::PathTraversal(format!(
+            "absolute sandbox path not allowed: {}",
+            sandbox_path.display()
+        )));
+    }
+
+    // Reject path traversal components
+    for component in relative.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(SandcastleError::PathTraversal(format!(
+                    "path traversal not allowed: {}",
+                    sandbox_path.display()
+                )));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(SandcastleError::PathTraversal(format!(
+                    "invalid path component: {}",
+                    sandbox_path.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(relative)
 }

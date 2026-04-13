@@ -25,7 +25,18 @@ echo "--- Test 1: Executor binary (direct) ---"
 # Ensure /workspace exists for executor
 mkdir -p /workspace
 
-result=$(echo '{"action":"exec","language":"bash","code":"echo hello from sandcastle","timeout_ms":5000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null)
+# Helper: executor now emits {"ready":true} first, so parse the last JSON line
+parse_exec_result() {
+    python3 -c "
+import sys, json
+lines = [l.strip() for l in sys.stdin if l.strip()]
+# Skip the ready signal, parse the last line
+result = json.loads(lines[-1])
+print(json.dumps(result))
+"
+}
+
+result=$(echo '{"action":"exec","language":"bash","code":"echo hello from sandcastle","timeout_ms":5000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null | parse_exec_result)
 echo "  Result: $result"
 
 stdout=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['stdout'].strip())")
@@ -37,7 +48,7 @@ else
 fi
 
 # Test Python execution
-result=$(echo '{"action":"exec","language":"python","code":"print(2 + 2)","timeout_ms":5000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null)
+result=$(echo '{"action":"exec","language":"python","code":"print(2 + 2)","timeout_ms":5000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null | parse_exec_result)
 stdout=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['stdout'].strip())")
 if [ "$stdout" = "4" ]; then
     echo "  ✅ PASS: Executor python execution works"
@@ -50,7 +61,7 @@ fi
 echo ""
 echo "--- Test 2: Executor timeout handling ---"
 
-result=$(echo '{"action":"exec","language":"bash","code":"sleep 10","timeout_ms":1000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null)
+result=$(echo '{"action":"exec","language":"bash","code":"sleep 10","timeout_ms":1000}' | "$PROJECT_DIR/service/target/debug/sandcastle-executor" 2>/dev/null | parse_exec_result)
 timed_out=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['timed_out'])")
 if [ "$timed_out" = "True" ]; then
     echo "  ✅ PASS: Timeout detection works"

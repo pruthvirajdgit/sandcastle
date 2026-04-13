@@ -94,7 +94,7 @@ pub enum SandcastleError {
     RuntimeError(String),
     InvalidParams(String),        // -32602
     UnknownTool(String),          // -32602
-    UnsupportedIsolation(IsolationLevel),
+    UnsupportedIsolation(String),
     UnsupportedLanguage(String),
 }
 ```
@@ -162,7 +162,7 @@ pub struct SandboxManager {
 impl SandboxManager {
     pub fn new(runtimes: HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>, config: ManagerConfig) -> Self;
     pub fn with_runtime(runtime: Arc<dyn SandboxRuntime>, config: ManagerConfig) -> Self; // single-backend compat
-    pub async fn execute_oneshot(&self, code: &str, language: Language, timeout: Duration, isolation: IsolationLevel) -> Result<ExecResult>;
+    pub async fn execute_oneshot(&self, code: &str, language: Language, isolation: IsolationLevel, timeout: Duration) -> Result<ExecResult>;
     pub async fn create_session(&self, config: SandboxConfig) -> Result<String>;
     pub async fn execute_in_session(&self, session_id: &str, code: &str, timeout: Duration) -> Result<ExecResult>;
     pub async fn upload(&self, session_id: &str, host_path: &Path, sandbox_path: &str) -> Result<u64>;
@@ -293,7 +293,7 @@ pub struct GvisorConfig {
     pub state_dir: PathBuf,       // /run/sandcastle/gvisor
     pub bundle_dir: PathBuf,      // /var/lib/sandcastle/gvisor/bundles
     pub workspace_dir: PathBuf,   // /var/lib/sandcastle/gvisor/workspaces
-    pub executor_path: PathBuf,   // /var/lib/sandcastle/rootfs/python/sandbox/executor
+    pub executor_path: PathBuf,   // /var/lib/sandcastle/bin/executor
     pub platform: String,         // "ptrace" (default, no KVM needed)
 }
 ```
@@ -325,12 +325,14 @@ GvisorSandbox {
 }
 
 ContainerHandle {
-    child: Child,              // tokio::process::Child (runsc run process)
-    stdin: ChildStdin,         // Write end to executor
-    stdout: BufReader<ChildStdout>,  // Read end from executor
+    child: Option<Child>,              // tokio::process::Child (None before start)
+    stdin: Option<ChildStdin>,         // Persistent write pipe to executor
+    stdout: Option<BufReader<ChildStdout>>,  // Persistent buffered read pipe
     language: Language,
     bundle_dir: PathBuf,
     workspace_dir: PathBuf,
+    container_id: String,
+    exec_lock: Arc<Mutex<()>>,   // Serializes concurrent execute calls
 }
 ```
 
@@ -339,9 +341,9 @@ ContainerHandle {
 ```
 create() → prepare OCI bundle + rootfs symlink + workspace dir (chmod 777)
   ↓
-start() → tokio::process::Command::new("runsc").arg("run") + sleep 500ms for readiness
+start() → tokio::process::Command::new("runsc").arg("run") + wait for {"ready":true} from executor
   ↓
-execute() → write JSON to child.stdin → read JSON from child.stdout (with timeout)
+execute() → write JSON to persistent stdin → read JSON from persistent stdout (with timeout)
   ↓ (can call execute() multiple times)
 stop() → runsc kill SIGKILL + child.kill() + child.wait() (prevent zombies)
   ↓
@@ -352,10 +354,10 @@ destroy() → runsc delete --force + remove bundle + workspace dirs
 
 | Feature | ProcessSandbox | GvisorSandbox |
 |---------|---------------|---------------|
-| OCI version | 1.0.2 | 1.1.0-rc.1 |
+| OCI version | 1.0.2 | 1.0.2 |
 | Namespaces | PID, Mount | PID, Mount, IPC, UTS, Network |
-| Root path | Absolute path to rootfs | Relative "rootfs" (symlinked) |
-| /dev | tmpfs mount | Not mounted (runsc handles) |
+| Root path | Absolute path to rootfs | Absolute path to rootfs |
+| /dev | tmpfs mount | tmpfs mount |
 | Container runtime | libcontainer (in-process) | runsc CLI (subprocess) |
 | ID prefix | `sc-` | `gv-` |
 

@@ -160,8 +160,8 @@ Unlike libcontainer which separates `create()` and `start()`, runsc's `run` comm
 ### 4. OCI spec version for gVisor
 runsc works with OCI spec version `1.1.0-rc.1`. Using `1.0.2` (like libcontainer) may cause warnings or compatibility issues.
 
-### 5. 500ms readiness sleep is fragile
-After spawning `runsc run`, the GvisorSandbox sleeps 500ms to wait for the executor to be ready. This can be flaky under load. A proper readiness protocol (executor emits `{"ready":true}` on startup) is deferred for now.
+### 5. Executor readiness handshake
+The executor emits `{"ready":true}` on stdout at startup. The host (`start()`) waits for this line before proceeding. This replaced the earlier fragile 500ms fixed sleep. If the executor fails to start, the host gets an immediate error instead of a delayed failure on first execute.
 
 ### 6. runsc state directory must be separate
 runsc uses `--root /run/sandcastle/gvisor` for container state. This MUST be separate from libcontainer's `/run/sandcastle` to avoid conflicts between the two runtimes.

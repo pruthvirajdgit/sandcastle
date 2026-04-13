@@ -249,9 +249,24 @@ impl SandboxRuntime for ProcessSandbox {
         .await
         .map_err(|e| SandcastleError::RuntimeError(format!("spawn blocking: {e}")))??;
 
-        // Update status
+        // Update status and wait for executor readiness
         let mut containers = self.containers.write().await;
         if let Some(handle) = containers.get_mut(&id.0) {
+            // Read the executor's readiness signal
+            let mut ready_line = String::new();
+            handle.stdout_reader.read_line(&mut ready_line).map_err(|e| {
+                SandcastleError::RuntimeError(format!(
+                    "failed to read executor ready signal: {e}"
+                ))
+            })?;
+
+            if !ready_line.contains("\"ready\"") {
+                return Err(SandcastleError::RuntimeError(format!(
+                    "unexpected executor startup message: {}",
+                    ready_line.trim()
+                )));
+            }
+
             handle.status = SandboxStatus::Running;
         }
 
