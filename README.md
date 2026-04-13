@@ -41,12 +41,12 @@ Sandcastle solves this by providing **sandboxed execution as an MCP tool**. Any 
 ### MCP Tools on Agent Dashboard
 
 <!-- Replace with screenshot of the MCP tool configs as seen on the agent dashboard -->
-![MCP Tools Dashboard](docs/images/mcp-tools-dashboard.png)
+![MCP Tools Dashboard](docs/assets/dashboard.png)
 
 ### Live Demo — All 3 Isolation Levels
 
 <!-- Replace with a GIF showing live execution across low, medium, and high isolation -->
-![Live Demo](docs/images/live-demo.gif)
+![Live Demo](docs/assets/demo.gif)
 
 ### One-shot execution (ephemeral sandbox)
 ```
