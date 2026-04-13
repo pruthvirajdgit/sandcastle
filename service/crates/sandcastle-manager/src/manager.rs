@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -90,23 +90,49 @@ impl SandboxManager {
     pub async fn create_session(&self, config: SandboxConfig) -> Result<String> {
         let runtime = self.get_runtime(config.isolation)?;
 
+        let session_id = format!("sb-{}", uuid::Uuid::new_v4());
+
+        // Reserve slot atomically: check limit + insert placeholder under one write lock
         {
-            let sessions = self.sessions.read().await;
+            let mut sessions = self.sessions.write().await;
             if sessions.len() >= self.config.max_sessions {
                 return Err(SandcastleError::MaxSessionsReached(self.config.max_sessions));
             }
+            // Insert placeholder to reserve the slot
+            sessions.insert(
+                session_id.clone(),
+                Session::new(SandboxId("pending".into()), config.language, config.isolation),
+            );
         }
 
-        let session_id = format!("sb-{}", uuid::Uuid::new_v4());
-        let sandbox_id = runtime.create(&config).await?;
-        runtime.start(&sandbox_id).await?;
+        // Do async work outside the lock
+        let sandbox_id = match runtime.create(&config).await {
+            Ok(id) => id,
+            Err(e) => {
+                // Rollback: remove placeholder
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(&session_id);
+                return Err(e);
+            }
+        };
 
-        let session = Session::new(sandbox_id, config.language, config.isolation);
+        if let Err(e) = runtime.start(&sandbox_id).await {
+            // Rollback: destroy sandbox and remove placeholder
+            let _ = runtime.destroy(&sandbox_id).await;
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(&session_id);
+            return Err(e);
+        }
 
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(session_id.clone(), session);
+        // Update placeholder with real sandbox_id
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.sandbox_id = sandbox_id;
+            }
+        }
+
         info!("created session {session_id} (isolation={})", config.isolation);
-
         Ok(session_id)
     }
 
@@ -170,10 +196,8 @@ impl SandboxManager {
             return Err(SandcastleError::PathNotAllowed(canonical));
         }
 
-        // Check for path traversal in sandbox_path
-        if sandbox_path.contains("..") {
-            return Err(SandcastleError::PathTraversal(sandbox_path.to_string()));
-        }
+        // Sanitize sandbox path
+        let sandbox_dest = sanitize_sandbox_path(sandbox_path)?;
 
         // Check file size
         let metadata = std::fs::metadata(&canonical)
@@ -188,10 +212,9 @@ impl SandboxManager {
 
         let (sandbox_id, isolation) = self.get_active_session_info(session_id).await?;
         let runtime = self.get_runtime(isolation)?;
-        let sandbox_dest = Path::new(sandbox_path);
 
         runtime
-            .upload_file(&sandbox_id, &canonical, sandbox_dest)
+            .upload_file(&sandbox_id, &canonical, &sandbox_dest)
             .await
     }
 
@@ -202,10 +225,8 @@ impl SandboxManager {
         sandbox_path: &str,
         host_path: Option<&str>,
     ) -> Result<(PathBuf, u64)> {
-        // Check for path traversal in sandbox_path
-        if sandbox_path.contains("..") {
-            return Err(SandcastleError::PathTraversal(sandbox_path.to_string()));
-        }
+        // Sanitize sandbox path
+        let safe_sandbox = sanitize_sandbox_path(sandbox_path)?;
 
         let host_dest = match host_path {
             Some(p) => {
@@ -238,10 +259,9 @@ impl SandboxManager {
 
         let (sandbox_id, isolation) = self.get_active_session_info(session_id).await?;
         let runtime = self.get_runtime(isolation)?;
-        let sandbox_src = Path::new(sandbox_path);
 
         let bytes = runtime
-            .download_file(&sandbox_id, sandbox_src, &host_dest)
+            .download_file(&sandbox_id, &safe_sandbox, &host_dest)
             .await?;
 
         // Validate downloaded file size
@@ -347,6 +367,40 @@ impl SandboxManager {
         session.touch();
         Ok((session.sandbox_id.clone(), session.isolation))
     }
+}
+
+/// Sanitize a sandbox path: strip `/workspace` prefix, reject absolute paths and traversal.
+/// Returns a safe relative PathBuf that can be joined to a workspace directory.
+fn sanitize_sandbox_path(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+
+    // Strip /workspace or workspace prefix if present
+    let relative = path
+        .strip_prefix("/workspace")
+        .or_else(|_| path.strip_prefix("workspace"))
+        .unwrap_or(path);
+
+    // Reject absolute paths
+    if relative.is_absolute() {
+        return Err(SandcastleError::PathTraversal(raw.to_string()));
+    }
+
+    // Reject traversal and other dangerous components
+    for component in relative.components() {
+        match component {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SandcastleError::PathTraversal(raw.to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    // Reject empty path
+    if relative.as_os_str().is_empty() {
+        return Err(SandcastleError::InvalidParams("empty sandbox path".into()));
+    }
+
+    Ok(relative.to_path_buf())
 }
 
 #[cfg(test)]

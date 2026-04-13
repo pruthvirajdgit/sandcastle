@@ -416,6 +416,16 @@ fn execute_code(cmd: &ExecCommand) -> ExecResponse {
         }
     };
 
+    // Drain stdout/stderr concurrently to prevent pipe buffer deadlocks.
+    // We must read before wait(), otherwise a verbose child can fill the pipe
+    // buffer and block forever.
+    let max = cmd.max_output_bytes as usize;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || drain_pipe(stdout_pipe, max));
+    let stderr_handle = std::thread::spawn(move || drain_pipe(stderr_pipe, max));
+
     // Poll for completion with timeout
     let result = wait_with_timeout(&mut child, timeout);
     let elapsed = start.elapsed();
@@ -423,7 +433,8 @@ fn execute_code(cmd: &ExecCommand) -> ExecResponse {
     // Clean up code file
     let _ = fs::remove_file(&code_path);
 
-    let (stdout_str, stderr_str) = read_output(&mut child, cmd.max_output_bytes);
+    let stdout_str = stdout_handle.join().unwrap_or_default();
+    let stderr_str = stderr_handle.join().unwrap_or_default();
 
     let (exit_code, timed_out, oom_killed) = match result {
         WaitResult::Exited(code) => {
@@ -475,54 +486,42 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> Wait
     }
 }
 
-fn read_output(child: &mut std::process::Child, max_bytes: u64) -> (String, String) {
-    let max = max_bytes as usize;
+/// Drain a pipe into a string, capping at max_bytes but continuing to read
+/// (and discard) excess data to prevent the child from blocking on a full pipe.
+fn drain_pipe(pipe: Option<impl Read>, max_bytes: usize) -> String {
+    let Some(pipe) = pipe else {
+        return String::new();
+    };
 
-    let stdout = child
-        .stdout
-        .take()
-        .map(|out| {
-            let mut buf = vec![0u8; max];
-            let mut reader = io::BufReader::new(out);
-            let mut total = 0;
-            loop {
-                let remaining = max - total;
-                if remaining == 0 {
-                    break;
-                }
-                match reader.read(&mut buf[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(_) => break,
-                }
+    let mut reader = io::BufReader::new(pipe);
+    let mut buf = vec![0u8; max_bytes];
+    let mut total = 0;
+
+    // Read up to max_bytes into the buffer
+    loop {
+        let remaining = max_bytes - total;
+        if remaining == 0 {
+            break;
+        }
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => {
+                buf.truncate(total);
+                return String::from_utf8_lossy(&buf).into_owned();
             }
-            buf.truncate(total);
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-        .unwrap_or_default();
+            Ok(n) => total += n,
+            Err(_) => break,
+        }
+    }
 
-    let stderr = child
-        .stderr
-        .take()
-        .map(|err| {
-            let mut buf = vec![0u8; max];
-            let mut reader = io::BufReader::new(err);
-            let mut total = 0;
-            loop {
-                let remaining = max - total;
-                if remaining == 0 {
-                    break;
-                }
-                match reader.read(&mut buf[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(_) => break,
-                }
-            }
-            buf.truncate(total);
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-        .unwrap_or_default();
+    // Buffer is full — keep draining and discarding to prevent deadlock
+    let mut discard = [0u8; 8192];
+    loop {
+        match reader.read(&mut discard) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue,
+        }
+    }
 
-    (stdout, stderr)
+    buf.truncate(total);
+    String::from_utf8_lossy(&buf).into_owned()
 }

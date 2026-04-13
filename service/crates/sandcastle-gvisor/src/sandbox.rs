@@ -95,19 +95,13 @@ impl GvisorSandbox {
             )));
         }
 
-        // Ensure executor binary exists in rootfs
+        // Verify executor binary exists in rootfs (baked in by build-rootfs.sh)
         let executor_dest = source_rootfs.join("sandbox").join("executor");
         if !executor_dest.exists() {
-            if let Some(parent) = executor_dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    SandcastleError::SandboxCreationFailed(format!(
-                        "create executor dir in rootfs: {e}"
-                    ))
-                })?;
-            }
-            std::fs::copy(&self.config.executor_path, &executor_dest).map_err(|e| {
-                SandcastleError::SandboxCreationFailed(format!("copy executor binary: {e}"))
-            })?;
+            return Err(SandcastleError::SandboxCreationFailed(format!(
+                "executor binary not found in rootfs at {}. Run scripts/build-rootfs.sh to bake it in.",
+                executor_dest.display()
+            )));
         }
 
         // Create workspace dir on host
@@ -230,6 +224,11 @@ impl SandboxRuntime for GvisorSandbox {
 
         match ready_result {
             Ok(Ok(0)) => {
+                // Clean up on failure: kill the child
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let mut containers = self.containers.write().await;
+                containers.remove(&id.0);
                 return Err(SandcastleError::SandboxCreationFailed(
                     "executor closed stdout before sending ready signal".to_string(),
                 ));
@@ -237,6 +236,10 @@ impl SandboxRuntime for GvisorSandbox {
             Ok(Ok(_)) => {
                 let trimmed = ready_line.trim();
                 if !trimmed.contains("\"ready\"") {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let mut containers = self.containers.write().await;
+                    containers.remove(&id.0);
                     return Err(SandcastleError::SandboxCreationFailed(format!(
                         "unexpected executor startup message: {trimmed}"
                     )));
@@ -244,11 +247,19 @@ impl SandboxRuntime for GvisorSandbox {
                 debug!("gVisor executor ready for container {}", id.0);
             }
             Ok(Err(e)) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let mut containers = self.containers.write().await;
+                containers.remove(&id.0);
                 return Err(SandcastleError::SandboxCreationFailed(format!(
                     "error reading executor ready signal: {e}"
                 )));
             }
             Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let mut containers = self.containers.write().await;
+                containers.remove(&id.0);
                 return Err(SandcastleError::SandboxCreationFailed(
                     "timeout waiting for executor ready signal (10s)".to_string(),
                 ));
@@ -458,6 +469,17 @@ impl SandboxRuntime for GvisorSandbox {
 
         if !src.exists() {
             return Err(SandcastleError::FileNotFound(src));
+        }
+
+        // Reject symlinks to prevent escape via symlink created inside sandbox
+        let src_meta = std::fs::symlink_metadata(&src).map_err(|e| {
+            SandcastleError::RuntimeError(format!("stat file: {e}"))
+        })?;
+        if src_meta.file_type().is_symlink() {
+            return Err(SandcastleError::PathTraversal(format!(
+                "symlink not allowed: {}",
+                sandbox_path.display()
+            )));
         }
 
         if let Some(parent) = host_path.parent() {

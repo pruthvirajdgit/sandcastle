@@ -65,7 +65,10 @@ async fn main() -> anyhow::Result<()> {
             // Low isolation: ProcessSandbox (Linux namespaces via libcontainer)
             let process_config = ProcessConfig::default();
             let process_runtime = Arc::new(ProcessSandbox::new(process_config));
-            process_runtime.ensure_dirs().expect("failed to create process runtime directories");
+            if let Err(e) = process_runtime.ensure_dirs() {
+                tracing::error!("failed to create process runtime directories: {e}");
+                anyhow::bail!("failed to create process runtime directories: {e}");
+            }
             runtimes.insert(IsolationLevel::Low, process_runtime);
             tracing::info!("registered backend: low (ProcessSandbox/libcontainer)");
 
@@ -73,9 +76,12 @@ async fn main() -> anyhow::Result<()> {
             let gvisor_config = GvisorConfig::default();
             let gvisor_runtime = GvisorSandbox::new(gvisor_config);
             if gvisor_runtime.is_available() {
-                gvisor_runtime.ensure_dirs().expect("failed to create gVisor runtime directories");
-                runtimes.insert(IsolationLevel::Medium, Arc::new(gvisor_runtime));
-                tracing::info!("registered backend: medium (GvisorSandbox/runsc)");
+                if let Err(e) = gvisor_runtime.ensure_dirs() {
+                    tracing::warn!("failed to create gVisor runtime directories: {e}");
+                } else {
+                    runtimes.insert(IsolationLevel::Medium, Arc::new(gvisor_runtime));
+                    tracing::info!("registered backend: medium (GvisorSandbox/runsc)");
+                }
             } else {
                 tracing::warn!("runsc not found — medium isolation (gVisor) unavailable");
             }
@@ -98,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             } else {
                 tracing::warn!("firecracker or kernel not found — high isolation unavailable");
+            }
+
+            if runtimes.is_empty() {
+                anyhow::bail!("no sandbox backends registered — server cannot start without at least one backend");
             }
 
             let manager = Arc::new(SandboxManager::new(runtimes, config));

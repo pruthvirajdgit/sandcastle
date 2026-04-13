@@ -21,6 +21,26 @@ fn gvisor_config() -> GvisorConfig {
     }
 }
 
+/// Cleanup guard for gVisor sandboxes.
+struct GvisorGuard<'a> {
+    sandbox: &'a GvisorSandbox,
+    id: Option<sandcastle_runtime::SandboxId>,
+}
+
+impl<'a> Drop for GvisorGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            eprintln!("cleanup: destroying gVisor sandbox {id}");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = rt.block_on(self.sandbox.stop(&id));
+            let _ = rt.block_on(self.sandbox.destroy(&id));
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_gvisor_python_hello_world() {
     // Requires root and runsc
@@ -53,6 +73,12 @@ async fn test_gvisor_python_hello_world() {
         .await
         .expect("create failed");
     println!("Created gVisor sandbox: {id}");
+
+    // Set up cleanup guard
+    let mut guard = GvisorGuard {
+        sandbox: &sandbox,
+        id: Some(id.clone()),
+    };
 
     // Start
     println!("Starting gVisor sandbox...");
@@ -99,10 +125,13 @@ print(json.dumps(data))
     assert_eq!(parsed["source"], "gvisor");
     assert_eq!(parsed["numbers"], serde_json::json!([0, 1, 4, 9, 16]));
 
-    // Stop and destroy
+    // Clean shutdown
     println!("Stopping gVisor sandbox...");
     sandbox.stop(&id).await.expect("stop failed");
     println!("Destroying gVisor sandbox...");
     sandbox.destroy(&id).await.expect("destroy failed");
+
+    // Disarm guard
+    guard.id = None;
     println!("gVisor e2e test passed! ✅");
 }

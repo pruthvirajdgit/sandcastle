@@ -15,6 +15,19 @@ set -euo pipefail
 ROOTFS_DIR="${1:-/var/lib/sandcastle/rootfs}"
 EXECUTOR_BIN="${2:-$(dirname "$0")/../service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor}"
 
+# Cleanup trap: unmount and remove temp dirs on failure
+CLEANUP_MOUNT=""
+CLEANUP_TMPDIR=""
+cleanup() {
+    if [ -n "$CLEANUP_MOUNT" ] && mountpoint -q "$CLEANUP_MOUNT" 2>/dev/null; then
+        umount "$CLEANUP_MOUNT" || true
+    fi
+    if [ -n "$CLEANUP_TMPDIR" ] && [ -d "$CLEANUP_TMPDIR" ]; then
+        rmdir "$CLEANUP_TMPDIR" || true
+    fi
+}
+trap cleanup EXIT
+
 echo "=== Sandcastle Firecracker rootfs builder ==="
 echo "Rootfs dir: $ROOTFS_DIR"
 echo "Executor binary: $EXECUTOR_BIN"
@@ -61,7 +74,9 @@ build_ext4() {
     # Mount and copy rootfs contents
     local mount_point
     mount_point=$(mktemp -d)
+    CLEANUP_TMPDIR="$mount_point"
     mount -o loop "$dest_img" "$mount_point"
+    CLEANUP_MOUNT="$mount_point"
 
     # Copy rootfs directory contents
     cp -a "$src_dir"/. "$mount_point"/
@@ -79,7 +94,9 @@ build_ext4() {
 
     # Unmount
     umount "$mount_point"
+    CLEANUP_MOUNT=""
     rmdir "$mount_point"
+    CLEANUP_TMPDIR=""
 
     echo "  Done: $(du -sh "$dest_img" | cut -f1) image"
 }

@@ -117,6 +117,18 @@ fn build_linux(limits: &ResourceLimits) -> Result<oci_spec::runtime::Linux, Stri
             .typ(LinuxNamespaceType::Mount)
             .build()
             .unwrap(),
+        LinuxNamespaceBuilder::default()
+            .typ(LinuxNamespaceType::Ipc)
+            .build()
+            .unwrap(),
+        LinuxNamespaceBuilder::default()
+            .typ(LinuxNamespaceType::Uts)
+            .build()
+            .unwrap(),
+        LinuxNamespaceBuilder::default()
+            .typ(LinuxNamespaceType::Network)
+            .build()
+            .unwrap(),
     ];
 
     let pids = LinuxPidsBuilder::default()
@@ -183,6 +195,9 @@ mod tests {
             .collect();
         assert!(ns_types.contains(&LinuxNamespaceType::Pid));
         assert!(ns_types.contains(&LinuxNamespaceType::Mount));
-        assert_eq!(ns_types.len(), 2);
+        assert!(ns_types.contains(&LinuxNamespaceType::Ipc));
+        assert!(ns_types.contains(&LinuxNamespaceType::Uts));
+        assert!(ns_types.contains(&LinuxNamespaceType::Network));
+        assert_eq!(ns_types.len(), 5);
     }
 }

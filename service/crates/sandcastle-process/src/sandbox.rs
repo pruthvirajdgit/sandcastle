@@ -23,7 +23,7 @@ struct ContainerHandle {
     /// Write end of stdin pipe — we send JSON commands here.
     stdin_writer: std::fs::File,
     /// Read end of stdout pipe — we receive JSON responses here.
-    stdout_reader: BufReader<std::fs::File>,
+    stdout_reader: Option<BufReader<std::fs::File>>,
     /// Language for this sandbox.
     language: Language,
     /// Path to the bundle directory.
@@ -102,19 +102,13 @@ impl ProcessSandbox {
         // The OCI spec root.path will point to the actual rootfs
         // We don't modify the rootfs — workspace is a separate bind mount
 
-        // Copy the executor binary into rootfs
+        // Verify executor binary exists in rootfs (baked in by build-rootfs.sh)
         let executor_dest = source_rootfs.join("sandbox").join("executor");
         if !executor_dest.exists() {
-            if let Some(parent) = executor_dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    SandcastleError::SandboxCreationFailed(format!(
-                        "create executor dir in rootfs: {e}"
-                    ))
-                })?;
-            }
-            std::fs::copy(&self.config.executor_path, &executor_dest).map_err(|e| {
-                SandcastleError::SandboxCreationFailed(format!("copy executor binary: {e}"))
-            })?;
+            return Err(SandcastleError::SandboxCreationFailed(format!(
+                "executor binary not found in rootfs at {}. Run scripts/build-rootfs.sh to bake it in.",
+                executor_dest.display()
+            )));
         }
 
         // Symlink rootfs into bundle
@@ -213,7 +207,7 @@ impl SandboxRuntime for ProcessSandbox {
         // Store our ends of the pipes
         let handle = ContainerHandle {
             stdin_writer: std::fs::File::from(stdin_write),
-            stdout_reader: BufReader::new(std::fs::File::from(stdout_read)),
+            stdout_reader: Some(BufReader::new(std::fs::File::from(stdout_read))),
             language: config.language,
             bundle_dir,
             workspace_dir,
@@ -249,25 +243,54 @@ impl SandboxRuntime for ProcessSandbox {
         .await
         .map_err(|e| SandcastleError::RuntimeError(format!("spawn blocking: {e}")))??;
 
-        // Update status and wait for executor readiness
-        let mut containers = self.containers.write().await;
-        if let Some(handle) = containers.get_mut(&id.0) {
-            // Read the executor's readiness signal
-            let mut ready_line = String::new();
-            handle.stdout_reader.read_line(&mut ready_line).map_err(|e| {
-                SandcastleError::RuntimeError(format!(
-                    "failed to read executor ready signal: {e}"
-                ))
-            })?;
+        // Update status and wait for executor readiness with timeout
+        {
+            let mut containers = self.containers.write().await;
+            if let Some(handle) = containers.get_mut(&id.0) {
+                // Take reader out for spawn_blocking (it requires Send)
+                let mut reader = handle.stdout_reader.take().ok_or_else(|| {
+                    SandcastleError::RuntimeError("stdout reader not available".into())
+                })?;
 
-            if !ready_line.contains("\"ready\"") {
-                return Err(SandcastleError::RuntimeError(format!(
-                    "unexpected executor startup message: {}",
-                    ready_line.trim()
-                )));
+                let read_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tokio::task::spawn_blocking(move || {
+                        let mut ready_line = String::new();
+                        let result = reader.read_line(&mut ready_line);
+                        (reader, ready_line, result)
+                    }),
+                )
+                .await;
+
+                match read_result {
+                    Ok(Ok((reader_back, ready_line, Ok(_)))) => {
+                        handle.stdout_reader = Some(reader_back);
+                        if !ready_line.contains("\"ready\"") {
+                            return Err(SandcastleError::RuntimeError(format!(
+                                "unexpected executor startup message: {}",
+                                ready_line.trim()
+                            )));
+                        }
+                    }
+                    Ok(Ok((_, _, Err(e)))) => {
+                        return Err(SandcastleError::RuntimeError(format!(
+                            "failed to read executor ready signal: {e}"
+                        )));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(SandcastleError::RuntimeError(format!(
+                            "readiness check panicked: {e}"
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(SandcastleError::RuntimeError(
+                            "timeout waiting for executor ready signal (10s)".to_string(),
+                        ));
+                    }
+                }
+
+                handle.status = SandboxStatus::Running;
             }
-
-            handle.status = SandboxStatus::Running;
         }
 
         info!("sandbox {} started", id.0);
@@ -321,7 +344,9 @@ impl SandboxRuntime for ProcessSandbox {
 
         let result = {
             let stdin = &mut handle.stdin_writer;
-            let stdout = &mut handle.stdout_reader;
+            let stdout = handle.stdout_reader.as_mut().ok_or_else(|| {
+                SandcastleError::ExecutionFailed("stdout reader not available".into())
+            })?;
 
             // Write command
             stdin.write_all(cmd_line.as_bytes()).map_err(|e| {
@@ -447,13 +472,19 @@ impl SandboxRuntime for ProcessSandbox {
             .get(&id.0)
             .ok_or_else(|| SandcastleError::SessionNotFound(id.0.clone()))?;
 
-        // The sandbox_path is relative to /workspace in the container.
-        // On host, that maps to handle.workspace_dir.
-        let dest = handle.workspace_dir.join(
-            sandbox_path
-                .strip_prefix("/workspace")
-                .unwrap_or(sandbox_path),
-        );
+        // Sanitize sandbox path: strip /workspace prefix, reject traversal
+        let relative = sandbox_path
+            .strip_prefix("/workspace")
+            .unwrap_or(sandbox_path);
+        if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(SandcastleError::PathTraversal(sandbox_path.display().to_string()));
+        }
+        let dest = handle.workspace_dir.join(relative);
+
+        // Verify dest is still under workspace_dir after resolution
+        if !dest.starts_with(&handle.workspace_dir) {
+            return Err(SandcastleError::PathTraversal(sandbox_path.display().to_string()));
+        }
 
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -484,14 +515,33 @@ impl SandboxRuntime for ProcessSandbox {
             .get(&id.0)
             .ok_or_else(|| SandcastleError::SessionNotFound(id.0.clone()))?;
 
-        let src = handle.workspace_dir.join(
-            sandbox_path
-                .strip_prefix("/workspace")
-                .unwrap_or(sandbox_path),
-        );
+        // Sanitize sandbox path: strip /workspace prefix, reject traversal
+        let relative = sandbox_path
+            .strip_prefix("/workspace")
+            .unwrap_or(sandbox_path);
+        if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(SandcastleError::PathTraversal(sandbox_path.display().to_string()));
+        }
+        let src = handle.workspace_dir.join(relative);
+
+        // Verify src is still under workspace_dir
+        if !src.starts_with(&handle.workspace_dir) {
+            return Err(SandcastleError::PathTraversal(sandbox_path.display().to_string()));
+        }
 
         if !src.exists() {
             return Err(SandcastleError::FileNotFound(src));
+        }
+
+        // Reject symlinks to prevent escape via symlink created inside sandbox
+        let src_meta = std::fs::symlink_metadata(&src).map_err(|e| {
+            SandcastleError::RuntimeError(format!("stat file: {e}"))
+        })?;
+        if src_meta.file_type().is_symlink() {
+            return Err(SandcastleError::PathTraversal(format!(
+                "symlink not allowed: {}",
+                sandbox_path.display()
+            )));
         }
 
         if let Some(parent) = host_path.parent() {
