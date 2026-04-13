@@ -157,8 +157,8 @@ Inside gVisor, the container process may run with different UID mappings. The wo
 ### 3. runsc run = create + start + wait
 Unlike libcontainer which separates `create()` and `start()`, runsc's `run` command does both in one shot. This means the GvisorSandbox's `create()` only preps the bundle — the actual container spawn happens in `start()`.
 
-### 4. OCI spec version for gVisor
-runsc works with OCI spec version `1.1.0-rc.1`. Using `1.0.2` (like libcontainer) may cause warnings or compatibility issues.
+### 4. OCI spec version
+Both ProcessSandbox (libcontainer) and GvisorSandbox (runsc) use OCI spec version `1.0.2`. This works correctly with the installed runsc version despite runsc supporting newer spec versions.
 
 ### 5. Executor readiness handshake
 The executor emits `{"ready":true}` on stdout at startup. The host (`start()`) waits for this line before proceeding. This replaced the earlier fragile 500ms fixed sleep. If the executor fails to start, the host gets an immediate error instead of a delayed failure on first execute.

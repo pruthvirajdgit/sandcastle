@@ -1,6 +1,6 @@
-///! Integration test: GvisorSandbox end-to-end.
-///! Requires root, runsc installed, and pre-built rootfs (scripts/build-rootfs.sh).
-///! Run: sudo cargo test -p sandcastle-gvisor --test e2e -- --nocapture
+//! Integration test: GvisorSandbox end-to-end.
+//! Requires root, runsc installed, and pre-built rootfs (scripts/build-rootfs.sh).
+//! Run: sudo cargo test -p sandcastle-gvisor --test e2e -- --nocapture
 
 use std::time::Duration;
 
