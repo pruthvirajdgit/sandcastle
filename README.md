@@ -139,32 +139,27 @@ Destroy a sandbox and all its data.
 
 ## Quick Start
 
-### As an MCP tool (stdio)
+### Automated Setup (Recommended)
+```bash
+git clone https://github.com/pruthvirajdgit/sandcastle.git
+cd sandcastle
+sudo ./scripts/setup.sh
+```
+
+This installs all dependencies, builds the project, creates rootfs images, and configures MCP. After completion, start a Copilot CLI session and run `/mcp` to verify.
+
+### Manual MCP Configuration
+If you prefer manual setup, add to `~/.copilot/mcp-config.json`:
 ```json
 {
   "mcpServers": {
     "sandcastle": {
-      "command": "sandcastle",
-      "args": ["serve", "--stdio"]
+      "type": "stdio",
+      "command": "sudo",
+      "args": ["/path/to/sandcastle/service/target/debug/sandcastle", "serve", "--transport", "stdio"]
     }
   }
 }
-```
-
-### As an HTTP server
-```bash
-sandcastle serve --http --port 8090
-```
-
-### Self-hosted
-```bash
-# Install
-curl -fsSL https://sandcastle.dev/install.sh | sh
-
-# Start the sandbox pool
-sandcastle start --pool-size 10 --default-isolation medium
-
-# The MCP server is now ready for connections
 ```
 
 ## Architecture
