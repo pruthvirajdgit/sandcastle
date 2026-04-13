@@ -6,12 +6,21 @@
 #   rootfs/bash/     — Alpine with bash
 #   rootfs/javascript/ — Node 20 slim
 #
-# Usage: sudo ./scripts/build-rootfs.sh [--rootfs-dir /path/to/rootfs] [--executor /path/to/executor]
+# Usage: sudo ./scripts/build-rootfs.sh [ROOTFS_DIR] [EXECUTOR_PATH]
 
 set -euo pipefail
 
 ROOTFS_DIR="${1:-/var/lib/sandcastle/rootfs}"
 EXECUTOR_BIN="${2:-$(dirname "$0")/../service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor}"
+
+# Cleanup trap: remove any leftover Docker containers on failure
+CLEANUP_CONTAINER=""
+cleanup() {
+    if [ -n "$CLEANUP_CONTAINER" ]; then
+        docker rm -f "$CLEANUP_CONTAINER" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
 
 echo "=== Sandcastle rootfs builder ==="
 echo "Rootfs dir: $ROOTFS_DIR"
@@ -47,10 +56,12 @@ build_rootfs() {
     # Create a temporary container and export its filesystem
     local container_id
     container_id=$(docker create "$image" /bin/true 2>/dev/null)
+    CLEANUP_CONTAINER="$container_id"
     echo "  Created container: $container_id"
 
-    docker export "$container_id" | tar -xf - -C "$dest" 2>/dev/null
+    docker export "$container_id" | tar -xf - -C "$dest"
     docker rm "$container_id" >/dev/null 2>&1
+    CLEANUP_CONTAINER=""
     echo "  Exported filesystem to $dest"
 
     # Create /sandbox dir and copy executor

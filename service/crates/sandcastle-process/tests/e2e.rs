@@ -19,6 +19,27 @@ fn process_config() -> ProcessConfig {
     }
 }
 
+/// Cleanup guard: ensures sandbox is destroyed even if test panics.
+struct SandboxGuard<'a> {
+    sandbox: &'a ProcessSandbox,
+    id: Option<sandcastle_runtime::SandboxId>,
+}
+
+impl<'a> Drop for SandboxGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            eprintln!("cleanup: destroying sandbox {id}");
+            // Use a new runtime to block on async cleanup in Drop
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = rt.block_on(self.sandbox.stop(&id));
+            let _ = rt.block_on(self.sandbox.destroy(&id));
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_python_hello_world() {
     // This test requires root privileges and pre-built rootfs images.
@@ -42,6 +63,12 @@ async fn test_python_hello_world() {
     println!("Creating sandbox...");
     let id = sandbox.create(&sandbox_config).await.expect("create failed");
     println!("Created sandbox: {id}");
+
+    // Set up cleanup guard
+    let mut guard = SandboxGuard {
+        sandbox: &sandbox,
+        id: Some(id.clone()),
+    };
 
     // Check status
     let status = sandbox.status(&id).await.expect("status failed");
@@ -88,10 +115,13 @@ print(json.dumps(data))
     assert_eq!(parsed["message"], "sandbox works");
     assert_eq!(parsed["numbers"], serde_json::json!([0, 1, 4, 9, 16]));
 
-    // Stop and destroy
+    // Clean shutdown (guard will handle cleanup if we panic before here)
     println!("Stopping sandbox...");
     sandbox.stop(&id).await.expect("stop failed");
     println!("Destroying sandbox...");
     sandbox.destroy(&id).await.expect("destroy failed");
+
+    // Disarm guard — clean shutdown succeeded
+    guard.id = None;
     println!("Done!");
 }
