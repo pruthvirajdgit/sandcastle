@@ -36,6 +36,82 @@ Sandcastle solves this by providing **sandboxed execution as an MCP tool**. Any 
 - **Medium** (default): For general untrusted code. gVisor intercepts every syscall — no direct kernel access. Good balance of speed and security.
 - **High**: For fully untrusted code — user submissions, internet-sourced code, potential malware. Each execution runs in its own Firecracker microVM with hardware-level isolation via KVM.
 
+## Demo
+
+### One-shot execution (ephemeral sandbox)
+```
+You: "Run print('hello from sandcastle') in python using low isolation"
+
+→ Copilot calls execute_code tool:
+  { "code": "print('hello from sandcastle')", "language": "python", "isolation": "low" }
+
+→ Result:
+  { "stdout": "hello from sandcastle\n", "exit_code": 0, "execution_time_ms": 12 }
+```
+
+### Persistent session (stateful sandbox)
+```
+You: "Create a python sandbox, define a function, then call it"
+
+→ Step 1: create_sandbox { "language": "python", "isolation": "medium" }
+  Result: { "session_id": "sb-a1b2c3d4-..." }
+
+→ Step 2: execute_in_session { "session_id": "sb-a1b2c3d4-...", "code": "def greet(name): return f'Hello, {name}!'" }
+  Result: { "stdout": "", "exit_code": 0 }
+
+→ Step 3: execute_in_session { "session_id": "sb-a1b2c3d4-...", "code": "print(greet('Sandcastle'))" }
+  Result: { "stdout": "Hello, Sandcastle!\n", "exit_code": 0 }
+
+→ Step 4: destroy_sandbox { "session_id": "sb-a1b2c3d4-..." }
+```
+
+### File transfer
+```
+You: "Upload a CSV, process it in Python, and download the result"
+
+→ upload_file   { "session_id": "...", "path": "/workspace/data.csv", "content": "name,score\nAlice,95\nBob,87" }
+→ execute_in_session { "session_id": "...", "code": "import csv\nwith open('/workspace/data.csv') as f: ..." }
+→ download_file { "session_id": "...", "path": "/workspace/result.json" }
+  Result: { "content": "{\"average\": 91.0}" }
+```
+
+### Firecracker microVM (high isolation)
+```
+You: "Execute untrusted code with maximum isolation"
+
+→ execute_code { "code": "import os; print(os.uname())", "language": "python", "isolation": "high" }
+  Result: { "stdout": "posix.uname_result(sysname='Linux', ...)\n", "exit_code": 0, "execution_time_ms": 280 }
+  # Ran inside a dedicated Firecracker microVM with KVM hardware isolation
+```
+
+## 🤖 AI-Native Repository
+
+This repository is **AI-native** — it is designed from the ground up for AI agents to read, understand, and contribute to.
+
+### How it works
+
+Any AI agent (Copilot, Claude, GPT, or custom) can onboard itself by reading the **`.context_bank/`** directory, which contains the project's source-of-truth documentation:
+
+| File | Purpose |
+|------|---------|
+| `OVERVIEW.md` | What Sandcastle is, repo layout, current status, quick commands |
+| `ARCHITECTURE.md` | System design, crate structure, data flow diagrams |
+| `CRATE_REFERENCE.md` | Per-crate API reference and key types |
+| `CONVENTIONS.md` | Coding rules, build commands, workflow rules |
+| `KNOWN_ISSUES.md` | Gotchas, quirks, and lessons learned |
+
+Additional product and technical docs live in `docs/`.
+
+### Contributing with AI
+
+1. **Read** `.context_bank/` to understand the project
+2. **Branch** from `main` (never push directly)
+3. **Build** with `cargo build` and **test** with `cargo test` (see `CONVENTIONS.md` for all commands)
+4. **Update `.context_bank/`** if your changes affect architecture, conventions, or known issues
+5. **Raise a PR** for review
+
+> **Rule**: Every PR that changes architecture, adds crates, modifies conventions, or introduces known issues **must** include corresponding updates to `.context_bank/`. This keeps the AI onboarding docs accurate for the next contributor — human or AI.
+
 ## MCP Tools
 
 ### `create_sandbox`
@@ -135,54 +211,6 @@ Destroy a sandbox and all its data.
     "sandbox_id": "sb-a1b2c3d4"
   }
 }
-```
-
-## Demo
-
-### One-shot execution (ephemeral sandbox)
-```
-You: "Run print('hello from sandcastle') in python using low isolation"
-
-→ Copilot calls execute_code tool:
-  { "code": "print('hello from sandcastle')", "language": "python", "isolation": "low" }
-
-→ Result:
-  { "stdout": "hello from sandcastle\n", "exit_code": 0, "execution_time_ms": 12 }
-```
-
-### Persistent session (stateful sandbox)
-```
-You: "Create a python sandbox, define a function, then call it"
-
-→ Step 1: create_sandbox { "language": "python", "isolation": "medium" }
-  Result: { "session_id": "sb-a1b2c3d4-..." }
-
-→ Step 2: execute_in_session { "session_id": "sb-a1b2c3d4-...", "code": "def greet(name): return f'Hello, {name}!'" }
-  Result: { "stdout": "", "exit_code": 0 }
-
-→ Step 3: execute_in_session { "session_id": "sb-a1b2c3d4-...", "code": "print(greet('Sandcastle'))" }
-  Result: { "stdout": "Hello, Sandcastle!\n", "exit_code": 0 }
-
-→ Step 4: destroy_sandbox { "session_id": "sb-a1b2c3d4-..." }
-```
-
-### File transfer
-```
-You: "Upload a CSV, process it in Python, and download the result"
-
-→ upload_file   { "session_id": "...", "path": "/workspace/data.csv", "content": "name,score\nAlice,95\nBob,87" }
-→ execute_in_session { "session_id": "...", "code": "import csv\nwith open('/workspace/data.csv') as f: ..." }
-→ download_file { "session_id": "...", "path": "/workspace/result.json" }
-  Result: { "content": "{\"average\": 91.0}" }
-```
-
-### Firecracker microVM (high isolation)
-```
-You: "Execute untrusted code with maximum isolation"
-
-→ execute_code { "code": "import os; print(os.uname())", "language": "python", "isolation": "high" }
-  Result: { "stdout": "posix.uname_result(sysname='Linux', ...)\n", "exit_code": 0, "execution_time_ms": 280 }
-  # Ran inside a dedicated Firecracker microVM with KVM hardware isolation
 ```
 
 ## Quick Start
@@ -292,34 +320,6 @@ If you prefer manual setup, add to `~/.copilot/mcp-config.json` (requires passwo
 | Self-hostable | ✅ | ❌ (cloud only) | ❌ (cloud only) | ✅ |
 | Boot time | 5-250ms | ~250ms | ~50ms | ~500ms |
 | Open source | ✅ | Partial | ❌ | ✅ |
-
-## 🤖 AI-Native Repository
-
-This repository is **AI-native** — it is designed from the ground up for AI agents to read, understand, and contribute to.
-
-### How it works
-
-Any AI agent (Copilot, Claude, GPT, or custom) can onboard itself by reading the **`.context_bank/`** directory, which contains the project's source-of-truth documentation:
-
-| File | Purpose |
-|------|---------|
-| `OVERVIEW.md` | What Sandcastle is, repo layout, current status, quick commands |
-| `ARCHITECTURE.md` | System design, crate structure, data flow diagrams |
-| `CRATE_REFERENCE.md` | Per-crate API reference and key types |
-| `CONVENTIONS.md` | Coding rules, build commands, workflow rules |
-| `KNOWN_ISSUES.md` | Gotchas, quirks, and lessons learned |
-
-Additional product and technical docs live in `docs/`.
-
-### Contributing with AI
-
-1. **Read** `.context_bank/` to understand the project
-2. **Branch** from `main` (never push directly)
-3. **Build** with `cargo build` and **test** with `cargo test` (see `CONVENTIONS.md` for all commands)
-4. **Update `.context_bank/`** if your changes affect architecture, conventions, or known issues
-5. **Raise a PR** for review
-
-> **Rule**: Every PR that changes architecture, adds crates, modifies conventions, or introduces known issues **must** include corresponding updates to `.context_bank/`. This keeps the AI onboarding docs accurate for the next contributor — human or AI.
 
 ## License
 
