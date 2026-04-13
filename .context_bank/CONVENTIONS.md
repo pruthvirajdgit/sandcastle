@@ -19,6 +19,9 @@ Coding standards, build commands, and workflow rules for this project.
 - Branch naming: `feat/description`, `fix/description`, `refactor/description`
 - Include `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` in commit messages when AI-assisted.
 
+### 3. Keep `.context_bank/` Up to Date
+Every PR that changes architecture, adds/removes crates, modifies conventions, or introduces known issues **must** include corresponding updates to `.context_bank/`. This is the AI onboarding source of truth — stale docs break the next contributor's workflow.
+
 ### 3. Static Executor Binary
 The executor binary MUST be statically linked with musl:
 ```bash
