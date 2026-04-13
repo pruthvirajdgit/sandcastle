@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use sandcastle_manager::{FileConfig, ManagerConfig, SandboxManager};
 use sandcastle_process::{ProcessConfig, ProcessSandbox};
 use sandcastle_gvisor::{GvisorConfig, GvisorSandbox};
+use sandcastle_firecracker::{FirecrackerConfig, FirecrackerSandbox};
 use sandcastle_runtime::{IsolationLevel, ResourceLimits, SandboxRuntime};
 
 #[derive(Parser)]
@@ -77,6 +78,26 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("registered backend: medium (GvisorSandbox/runsc)");
             } else {
                 tracing::warn!("runsc not found — medium isolation (gVisor) unavailable");
+            }
+
+            // High isolation: FirecrackerSandbox (microVM)
+            let fc_config = FirecrackerConfig::default();
+            let fc_runtime = FirecrackerSandbox::new(fc_config);
+            if fc_runtime.is_available() {
+                match fc_runtime.ensure_dirs() {
+                    Ok(()) => {
+                        runtimes.insert(IsolationLevel::High, Arc::new(fc_runtime));
+                        tracing::info!("registered backend: high (FirecrackerSandbox/Firecracker)");
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to create Firecracker runtime directories — high isolation unavailable"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!("firecracker or kernel not found — high isolation unavailable");
             }
 
             let manager = Arc::new(SandboxManager::new(runtimes, config));

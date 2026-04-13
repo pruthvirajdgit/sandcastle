@@ -19,18 +19,20 @@ sandcastle/
 │   └── KNOWN_ISSUES.md     # Gotchas, libcontainer quirks, lessons learned
 ├── docs/                   # User-facing documentation
 ├── scripts/
-│   └── build-rootfs.sh     # Builds per-language container root filesystems
+│   ├── build-rootfs.sh     # Builds per-language container root filesystems
+│   └── build-fc-rootfs.sh  # Builds ext4 images for Firecracker VMs
 ├── service/                # All Rust backend code (Cargo workspace)
 │   ├── Cargo.toml          # Workspace manifest
 │   └── crates/
-│       ├── sandcastle-runtime/    # Shared trait + types (the interface)
-│       ├── sandcastle-executor/   # Binary that runs INSIDE the container
-│       ├── sandcastle-manager/    # Session lifecycle, file transfer
-│       ├── sandcastle-process/    # Linux container backend (libcontainer)
-│       ├── sandcastle-gvisor/     # gVisor container backend (runsc CLI)
-│       └── sandcastle-server/     # MCP server binary (entry point)
+│       ├── sandcastle-runtime/       # Shared trait + types (the interface)
+│       ├── sandcastle-executor/      # Binary that runs INSIDE the sandbox
+│       ├── sandcastle-manager/       # Session lifecycle, file transfer
+│       ├── sandcastle-process/       # Linux container backend (libcontainer)
+│       ├── sandcastle-gvisor/        # gVisor container backend (runsc CLI)
+│       ├── sandcastle-firecracker/   # Firecracker microVM backend (firepilot)
+│       └── sandcastle-server/        # MCP server binary (entry point)
 ├── tests/
-│   └── integration.sh      # Shell-based integration tests (6 tests)
+│   └── integration.sh      # Shell-based integration tests (7 tests)
 ├── README.md               # Product overview and MCP tool reference
 └── .gitignore
 ```
@@ -56,16 +58,29 @@ sandcastle/
 - ✅ `sandcastle-gvisor` crate with GvisorSandbox implementing SandboxRuntime
 - ✅ IsolationLevel enum (Low/Medium/High) with per-request routing
 - ✅ Manager refactored: `HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>` for multi-backend
-- ✅ MCP tools accept `isolation` parameter ("low", "medium") — defaults to "low"
+- ✅ MCP tools accept `isolation` parameter ("low", "medium", "high") — defaults to "low"
 - ✅ Server registers both backends: ProcessSandbox (Low) + GvisorSandbox (Medium)
 - ✅ Graceful degradation when runsc not installed
 - ✅ 23 unit tests + 6 integration tests (including gVisor e2e and routing tests)
 - ✅ runsc installed (release-20260406.0, ptrace platform)
 
+### Phase 4 — Firecracker Backend (High Isolation) ✅ Complete
+- ✅ `sandcastle-firecracker` crate with FirecrackerSandbox implementing SandboxRuntime
+- ✅ Firecracker microVM lifecycle via `firepilot` crate (no shell commands in Rust)
+- ✅ Host ↔ VM communication via vsock (Firecracker UDS proxy protocol)
+- ✅ Dual-mode executor: stdin/stdout (containers) or vsock (VMs) via `--vsock` flag
+- ✅ File transfer over vsock (base64-encoded upload/download commands)
+- ✅ Ext4 rootfs images built via `scripts/build-fc-rootfs.sh`
+- ✅ Kernel at `/var/lib/sandcastle/kernel/vmlinux` (Linux 6.1)
+- ✅ Retry-based boot/vsock connection (no fixed sleep)
+- ✅ Path traversal protection on file operations
+- ✅ 27 unit tests + 3 e2e tests + 7 integration tests
+- ✅ Firecracker v1.12.0 + KVM on Azure VM
+
 ### Upcoming
-- ⬜ Firecracker microVM backend (Phase 4) — hardware virtualization for high isolation
+- ⬜ Pre-warmed sandbox pools per isolation level
 - ⬜ Network allowlisting with DNS proxy
-- ⬜ Pre-warmed sandbox pools
+- ⬜ HTTP+SSE transport for remote agents
 
 ## Quick Commands
 
@@ -73,7 +88,7 @@ sandcastle/
 # Build everything
 cd service && cargo build
 
-# Run all unit tests (23 tests)
+# Run all unit tests (27 tests)
 cd service && cargo test
 
 # Run e2e integration test for ProcessSandbox (requires root + rootfs images)
@@ -82,14 +97,23 @@ cd service && sudo $(which cargo) test -p sandcastle-process --test e2e -- --noc
 # Run e2e integration test for GvisorSandbox (requires root + runsc + rootfs images)
 cd service && sudo $(which cargo) test -p sandcastle-gvisor --test e2e -- --nocapture
 
-# Run full integration test suite (6 tests, requires root + rootfs + runsc)
+# Run e2e integration test for FirecrackerSandbox (requires root + KVM + firecracker + kernel + ext4 rootfs)
+cd service && sudo $(which cargo) test -p sandcastle-firecracker --test e2e -- --nocapture
+
+# Run full integration test suite (7 tests, requires root + rootfs + runsc + firecracker)
 sudo ./tests/integration.sh
 
-# Build static executor for containers
+# Build static executor for containers (stdio mode)
 cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl
+
+# Build static executor for Firecracker VMs (vsock mode)
+cd service && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode
 
 # Build rootfs images (requires Docker + root)
 sudo ./scripts/build-rootfs.sh
+
+# Build ext4 rootfs images for Firecracker (requires rootfs dirs + root)
+sudo ./scripts/build-fc-rootfs.sh
 
 # Start MCP server (requires root for container creation)
 sudo service/target/debug/sandcastle serve --transport stdio

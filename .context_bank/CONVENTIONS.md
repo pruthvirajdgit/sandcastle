@@ -11,7 +11,8 @@ Coding standards, build commands, and workflow rules for this project.
 
 **Exceptions**:
 - The executor binary (`sandcastle-executor`) runs INSIDE the sandbox and IS allowed to use `Command::new()` to spawn language runtimes. This is safe because it's already isolated.
-- The `sandcastle-gvisor::runsc` module (`runsc.rs`) is allowed to use `tokio::process::Command` to invoke the `runsc` CLI. This is the only host-side exception — `runsc` has no Rust crate equivalent and must be called as a subprocess. No other module may spawn host commands.
+- The `sandcastle-gvisor::runsc` module (`runsc.rs`) is allowed to use `tokio::process::Command` to invoke the `runsc` CLI. No other module may spawn host commands.
+- The `firepilot` crate (external dependency) internally spawns the Firecracker binary. This is an unavoidable library behavior, not our code.
 
 ### 2. Git Workflow — Always Use PRs
 - **Never push directly to `main`**. Always create a feature branch and raise a PR.
@@ -19,11 +20,15 @@ Coding standards, build commands, and workflow rules for this project.
 - Include `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` in commit messages when AI-assisted.
 
 ### 3. Static Executor Binary
-The executor binary MUST be statically linked with musl for container use:
+The executor binary MUST be statically linked with musl:
 ```bash
+# For containers (stdio mode)
 cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl
+
+# For Firecracker VMs (vsock mode)
+cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode
 ```
-A dynamically linked executor will die inside containers due to glibc version mismatch.
+A dynamically linked executor will die inside containers/VMs due to glibc version mismatch.
 
 ---
 
@@ -41,7 +46,7 @@ cargo build --release
 # Build static executor (REQUIRED for containers)
 cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl
 
-# Run all unit tests (15 tests, no root needed)
+# Run all unit tests (27 tests, no root needed)
 cargo test
 
 # Run only lib tests (no integration tests)
@@ -55,10 +60,19 @@ cargo test -p sandcastle-process
 # Run e2e test (requires root + rootfs images)
 sudo $(which cargo) test -p sandcastle-process --test e2e -- --nocapture
 
+# Run gVisor e2e test (requires root + runsc + rootfs images)
+sudo $(which cargo) test -p sandcastle-gvisor --test e2e -- --nocapture
+
+# Run Firecracker e2e test (requires root + KVM + firecracker + kernel + ext4 rootfs)
+sudo $(which cargo) test -p sandcastle-firecracker --test e2e -- --nocapture
+
 # Build rootfs images (requires Docker + root, run from repo root)
 sudo ./scripts/build-rootfs.sh
 
-# Run shell-based integration tests (from repo root)
+# Build ext4 rootfs images for Firecracker (run from repo root)
+sudo ./scripts/build-fc-rootfs.sh
+
+# Run shell-based integration tests (7 tests, from repo root)
 sudo ./tests/integration.sh
 ```
 
@@ -114,23 +128,37 @@ anyhow = "1"
 ```
 /var/lib/sandcastle/
 ├── rootfs/                 # Pre-built per-language root filesystems
-│   ├── python/             # python:3.12-slim Docker export
-│   │   └── sandbox/executor  # Static executor binary
+│   ├── python/             # python:3.12-slim Docker export (for containers)
+│   │   └── sandbox/executor  # Static executor binary (stdio mode)
 │   ├── javascript/         # node:20-slim Docker export
 │   │   └── sandbox/executor
-│   └── bash/               # bash:5 Docker export
-│       └── sandbox/executor
+│   ├── bash/               # bash:5 Docker export
+│   │   └── sandbox/executor
+│   ├── python.ext4         # Ext4 block device (for Firecracker VMs)
+│   ├── javascript.ext4     # Contains vsock-mode executor at /sandbox/executor
+│   └── bash.ext4
+├── kernel/
+│   └── vmlinux             # Linux 6.1 kernel for Firecracker VMs
 ├── bundles/                # Per-container OCI bundles (temporary)
 │   └── sc-{uuid}/
 │       ├── config.json     # OCI runtime spec
 │       └── rootfs → symlink to /var/lib/sandcastle/rootfs/{lang}
 ├── workspaces/             # Per-container workspace dirs (bind-mounted)
 │   └── sc-{uuid}/
+├── gvisor/                 # gVisor-specific directories
+│   ├── bundles/
+│   └── workspaces/
+├── firecracker/            # Firecracker-specific directories
+│   ├── {vm-id}/            # Per-VM state (firepilot chroot)
+│   └── workspaces/
+│       └── fc-{uuid}/
 └── bin/
     └── executor            # Canonical executor binary location
 
 /run/sandcastle/            # Container runtime state (libcontainer)
-└── sc-{uuid}/              # Per-container state (created by libcontainer)
+├── sc-{uuid}/              # Per-container state (created by libcontainer)
+└── gvisor/                 # gVisor runtime state (created by runsc)
+    └── gv-{uuid}/
 ```
 
 ---
@@ -139,9 +167,12 @@ anyhow = "1"
 
 | Entity | Pattern | Example |
 |--------|---------|---------|
-| Container/sandbox ID | `sc-{uuid_simple}` | `sc-a1b2c3d4e5f6...` |
+| Container/sandbox ID (low) | `sc-{uuid_simple}` | `sc-a1b2c3d4e5f6...` |
+| Container/sandbox ID (medium) | `gv-{uuid_simple}` | `gv-a1b2c3d4e5f6...` |
+| VM/sandbox ID (high) | `fc-{uuid_simple}` | `fc-a1b2c3d4e5f6...` |
 | Session ID | `sb-{uuid_v4}` | `sb-12345678-1234-...` |
 | Rootfs language dir | lowercase language name | `python`, `javascript`, `bash` |
+| Ext4 rootfs image | `{language}.ext4` | `python.ext4`, `bash.ext4` |
 | Bundle dir | Same as container ID | `/var/lib/sandcastle/bundles/sc-...` |
 | Workspace dir | Same as container ID | `/var/lib/sandcastle/workspaces/sc-...` |
 

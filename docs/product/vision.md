@@ -176,15 +176,24 @@ Automated pipeline → agent generates and runs tests.
 - ✅ 23 unit tests + 6 integration tests (including gVisor e2e)
 - ✅ runsc installed (release-20260406.0, ptrace platform)
 
-### Phase 4 — Firecracker + Advanced Isolation
-- High isolation backend (Firecracker microVM via KVM)
+### Phase 4 — Firecracker Backend (High Isolation) ✅ Complete
+- ✅ High isolation backend (Firecracker microVM via KVM + firepilot crate)
+- ✅ Host ↔ VM communication via vsock (Firecracker UDS proxy protocol)
+- ✅ Dual-mode executor: stdin/stdout (containers) or vsock (VMs)
+- ✅ File transfer over vsock (base64-encoded upload/download)
+- ✅ Ext4 rootfs images built via build-fc-rootfs.sh
+- ✅ Retry-based boot/vsock readiness (no fixed sleep)
+- ✅ 27 unit tests + 7 integration tests (including Firecracker e2e)
+- ✅ Firecracker v1.12.0 + KVM on Azure VM
+
+### Phase 5 — Performance & Networking
 - Pre-warmed sandbox pools per isolation level
 - Snapshot-based restore for Firecracker (fast wake)
 - Network allowlisting with DNS proxy
 - HTTP+SSE transport for remote agents
 - Pool management (target size, replenishment, idle timeout)
 
-### Phase 5 — Security Hardening
+### Phase 6 — Security Hardening
 - Malware scanning on file downloads (YARA rules + ClamAV)
 - File quarantine on malware detection
 - IP pinning for allowlisted domains (anti domain-fronting)

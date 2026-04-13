@@ -105,27 +105,38 @@ pub enum SandcastleError {
 
 ## sandcastle-executor
 
-**Role**: Binary that runs **inside** the container as PID 1. Receives code execution commands via stdin, runs them, returns results via stdout.
+**Role**: Binary that runs **inside** the sandbox as PID 1. Supports two modes: **stdio** (containers) and **vsock** (Firecracker VMs). Receives code execution commands, runs them, returns results.
 
 **Path**: `service/crates/sandcastle-executor/`
 
-**Binary**: Must be compiled with `--target x86_64-unknown-linux-musl` (static linking required for container use)
+**Binary**: Must be compiled with `--target x86_64-unknown-linux-musl` (static linking required)
+- Containers: `cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl`
+- Firecracker VMs: `cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode`
+
+### Dual-Mode Operation
+
+| Mode | Transport | Activated By | Used In |
+|------|-----------|-------------|---------|
+| stdio | stdin/stdout pipes | Default (no flags) | ProcessSandbox, GvisorSandbox |
+| vsock | vsock port 5000 | `--vsock` CLI flag | FirecrackerSandbox |
 
 ### Internal Types
 
 ```rust
-// Received from host on stdin (JSON line)
+// Received from host (JSON line)
 struct ExecCommand {
-    action: String,        // Must be "exec"
-    language: String,      // "python", "javascript", "bash"
-    code: String,          // The code to execute
-    timeout_ms: u64,       // Max execution time
-    max_output_bytes: u64, // Output truncation limit (default 1MB)
+    action: String,        // "exec", "upload", or "download"
+    language: String,      // "python", "javascript", "bash" (exec only)
+    code: String,          // The code to execute (exec only)
+    timeout_ms: u64,       // Max execution time (exec only)
+    max_output_bytes: u64, // Output truncation limit (exec only)
+    path: String,          // Sandbox path (upload/download only)
+    content_base64: String, // Base64-encoded file data (upload only)
 }
 
-// Sent to host on stdout (JSON line)
+// Sent to host (JSON line)
 struct ExecResponse {
-    stdout: String,
+    stdout: String,        // For downloads: base64-encoded file content
     stderr: String,
     exit_code: i32,        // -1 for internal errors, 124 for timeout, 137 for OOM
     execution_time_ms: u64,
@@ -135,12 +146,14 @@ struct ExecResponse {
 ```
 
 ### Key Behavior
-- Runs in a loop reading stdin line by line
+- **stdio mode**: Reads stdin line by line in a loop, writes responses to stdout
+- **vsock mode**: Binds `VsockListener` on port 5000, accepts one connection, reads/writes JSON lines
+- Shared `handle_line()` dispatcher for exec/upload/download actions
 - Writes code to `/workspace/code.{ext}`, spawns language runtime
-- Uses `Command::new()` (this is allowed here — runs inside sandbox, not on host)
+- Uses `Command::new()` (allowed — runs inside sandbox, not on host)
 - Poll-based timeout with 10ms intervals
 - Truncates output to `max_output_bytes`
-- Cleans up code file after each execution
+- Base64 encode/decode for file transfer (inline, no external crate)
 
 **Tests**: None (tested via e2e integration test)
 
@@ -365,6 +378,117 @@ destroy() → runsc delete --force + remove bundle + workspace dirs
 
 ---
 
+## sandcastle-firecracker
+
+**Role**: Firecracker microVM backend using the `firepilot` crate. Implements `SandboxRuntime` trait for high isolation. Provides full hardware virtualization via KVM — each sandbox is an independent virtual machine.
+
+**Path**: `service/crates/sandcastle-firecracker/`
+
+### Configuration
+
+```rust
+pub struct FirecrackerConfig {
+    pub firecracker_path: PathBuf,  // /usr/local/bin/firecracker
+    pub kernel_path: PathBuf,       // /var/lib/sandcastle/kernel/vmlinux
+    pub rootfs_dir: PathBuf,        // /var/lib/sandcastle/rootfs (ext4 images)
+    pub state_dir: PathBuf,         // /run/sandcastle/firecracker (VM state)
+    pub workspace_dir: PathBuf,     // /var/lib/sandcastle/fc-workspaces
+    pub guest_cid_base: u32,        // 100 (vsock CID base, incremented per VM)
+    pub vsock_port: u32,            // 5000 (port executor listens on inside VM)
+    pub memory_mb: u32,             // 256 (VM memory)
+    pub vcpu_count: u32,            // 1 (VM vCPUs)
+    pub boot_args: String,          // Kernel command line
+}
+```
+
+### Module Structure
+
+| Module | Purpose | Uses Command::new? |
+|--------|---------|--------------------|
+| `config.rs` | FirecrackerConfig with defaults, `is_available()` check | No |
+| `vsock.rs` | VsockConnection: UDS proxy protocol, readiness, JSON I/O | No |
+| `sandbox.rs` | FirecrackerSandbox implementing SandboxRuntime | No |
+
+Note: The `firepilot` crate internally spawns the Firecracker binary — this is an approved exception (same as runsc).
+
+### Key Dependencies
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| firepilot | 1.2.0 | Firecracker VM lifecycle (create, start, kill) |
+| hyper | 0.14 | HTTP client for Firecracker REST API (vsock config) |
+| hyperlocal | 0.8 | Unix socket HTTP transport for Firecracker API |
+| tokio | workspace | Async runtime, Unix streams, timers |
+| sandcastle-runtime | workspace | SandboxRuntime trait, types |
+
+### Internal Architecture
+
+```
+FirecrackerSandbox {
+    config: FirecrackerConfig,
+    vms: RwLock<HashMap<String, VmHandle>>,
+    next_cid: AtomicU32,   // Monotonically increasing guest CID
+}
+
+VmHandle {
+    machine: Machine,       // firepilot Machine (manages Firecracker process)
+    language: Language,
+    workspace_dir: PathBuf, // Host workspace (files staged here before vsock upload)
+    vsock_uds_path: PathBuf, // Path to Firecracker's vsock UDS proxy socket
+    guest_cid: u32,
+}
+```
+
+### VM Lifecycle
+
+```
+create() → prepare dirs + firepilot Machine::new() + machine.create(config)
+  ↓        Configures: kernel, rootfs (ext4 drive), vsock via REST API
+start() → machine.start() + vsock retry loop (up to 30s, 500ms intervals)
+  ↓        Waits for executor to be reachable via vsock readiness check
+execute() → VsockConnection::connect() → CONNECT 5000\n → OK → JSON request/response
+  ↓        Same JSON protocol as containers, but over vsock instead of stdin/stdout
+upload_file() → read host file → base64 encode → send upload command over vsock
+download_file() → send download command over vsock → base64 decode → write host file
+  ↓
+stop() → machine.kill()
+  ↓
+destroy() → cleanup state dirs + workspace
+```
+
+### Vsock Communication Protocol
+
+Firecracker exposes guest vsock via a Unix domain socket (UDS proxy):
+1. Host connects to `{state_dir}/{sandbox_id}.vsock`
+2. Sends `CONNECT <port>\n` (e.g., `CONNECT 5000\n`)
+3. Firecracker responds with `OK <port>\n`
+4. Bidirectional stream established — JSON commands flow same as stdin/stdout
+
+```
+VsockConnection {
+    stream: tokio::net::UnixStream,  // Connected to Firecracker UDS proxy
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+}
+```
+
+Key methods:
+- `connect(uds_path, port)` — Opens UDS, sends CONNECT, validates OK response
+- `wait_ready(uds_path, port, timeout)` — Retry loop until vsock is reachable
+- `execute_json(request)` — Send JSON line, read JSON response line
+
+### File Transfer
+
+Unlike containers (where host filesystem is bind-mounted), VM filesystems are isolated:
+- **Upload**: Host reads file → base64 encode → JSON `{"action":"upload","path":"...","content_base64":"..."}` over vsock
+- **Download**: JSON `{"action":"download","path":"..."}` over vsock → response stdout contains base64 data → decode → write to host
+- Path traversal protection: `sanitize_sandbox_path()` rejects `..` and absolute paths
+- Inline base64 encode/decode (no external crate)
+
+**Tests**: 1 unit test (config defaults) + 1 e2e integration test (Python execution in Firecracker VM, requires root + KVM)
+
+---
+
 ## sandcastle-server
 
 **Role**: MCP server entry point. Exposes sandbox operations as MCP tools via the `rmcp` crate.
@@ -400,12 +524,13 @@ main():
   2. Parse CLI args
   3. Create ProcessConfig + ProcessSandbox → register at IsolationLevel::Low
   4. Check if runsc available → if yes, create GvisorConfig + GvisorSandbox → register at IsolationLevel::Medium
-  5. Build HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>
-  6. Create ManagerConfig + SandboxManager with runtime map
-  7. Spawn reaper background task (runs every 5s)
-  8. Create SandcastleTools(manager)
-  9. Start rmcp stdio transport
-  10. Block on server.waiting()
+  5. Check if firecracker + kernel available → if yes, create FirecrackerConfig + FirecrackerSandbox → register at IsolationLevel::High
+  6. Build HashMap<IsolationLevel, Arc<dyn SandboxRuntime>>
+  7. Create ManagerConfig + SandboxManager with runtime map
+  8. Spawn reaper background task (runs every 5s)
+  9. Create SandcastleTools(manager)
+  10. Start rmcp stdio transport
+  11. Block on server.waiting()
 ```
 
 ### Key Dependencies

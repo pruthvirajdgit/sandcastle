@@ -168,6 +168,55 @@ runsc uses `--root /run/sandcastle/gvisor` for container state. This MUST be sep
 
 ---
 
+## Firecracker
+
+### 1. PID 1 zombie reaping (deferred)
+The executor runs as PID 1 inside the VM. It does not reap orphan grandchild processes. If a spawned language runtime process forks and the child exits before the parent, zombies accumulate. This is acceptable for short-lived VM sessions but should be addressed for long-running sessions.
+
+### 2. Ext4 rootfs images are copied on each VM create
+firepilot copies the entire ext4 drive image into the chroot directory on each `machine.create()`. For large images (300MB+ for JavaScript), this adds 1-2 seconds overhead. Potential future optimization: use overlayfs or copy-on-write snapshots.
+
+### 3. Vsock connection requires retry loop
+The VM boot process takes time — the executor inside the VM isn't ready immediately after `machine.start()`. The host must retry vsock connections with a timeout (default: 30s, 500ms intervals). A fixed sleep is fragile and should never be used.
+
+### 4. Firecracker vsock UDS proxy protocol
+Firecracker exposes guest vsock via a Unix domain socket. The host MUST follow this protocol:
+1. Connect to the UDS file
+2. Send `CONNECT <port>\n`
+3. Receive `OK <port>\n`
+4. Then bidirectional JSON streaming works
+
+If you skip the CONNECT handshake, the connection silently fails.
+
+### 5. Vsock connection is persistent per VM
+The host establishes the vsock connection after boot and reuses it across multiple `execute()` calls for the same VM/session. The `VsockConnection` is stored on the `VmHandle`, and the executor processes multiple newline-delimited JSON request/response messages over that single connection. Do not assume `execute()` creates a fresh CONNECT/OK handshake each time.
+
+### 6. File transfer uses base64 over vsock
+Unlike containers where files are directly copied to the bind-mounted workspace directory, Firecracker VMs require file transfer over vsock using base64 encoding. This means:
+- Large files are slower (base64 overhead + serialization)
+- File size is limited by available memory for the base64 buffer
+- Path traversal protection is enforced inside the executor
+
+### 7. Kernel path must exist
+FirecrackerConfig checks `is_available()` for both the firecracker binary and the kernel file. If either is missing, the backend is not registered and `IsolationLevel::High` returns `UnsupportedIsolation`.
+
+### 8. KVM required
+Firecracker requires `/dev/kvm` with Intel VT-x or AMD-V. On Azure VMs, ensure you're using a v3/v4 series with nested virtualization enabled. Check: `ls /dev/kvm`.
+
+### 9. Stale VM state cleanup
+If a test crashes, Firecracker processes and state directories may persist. Clean up:
+```bash
+# Kill any orphan Firecracker processes
+ps aux | grep firecracker
+sudo kill <pid>
+
+# Clean up state directories
+sudo rm -rf /run/sandcastle/firecracker/fc-*
+sudo rm -rf /var/lib/sandcastle/fc-workspaces/fc-*
+```
+
+---
+
 ## General
 
 ### 1. File transfers use bind mounts, not /proc
