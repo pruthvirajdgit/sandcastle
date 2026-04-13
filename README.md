@@ -146,10 +146,10 @@ cd sandcastle
 sudo ./scripts/setup.sh
 ```
 
-This installs all dependencies, builds the project, creates rootfs images, and configures MCP. After completion, start a Copilot CLI session and run `/mcp` to verify.
+This installs all dependencies, builds the project, creates rootfs images, and configures MCP. Note that Copilot CLI launches the MCP server via `sudo`, so you must have passwordless sudo configured; otherwise `/mcp` may hang or fail. After completion, start a Copilot CLI session and run `/mcp` to verify.
 
 ### Manual MCP Configuration
-If you prefer manual setup, add to `~/.copilot/mcp-config.json`:
+If you prefer manual setup, add to `~/.copilot/mcp-config.json` (requires passwordless sudo):
 ```json
 {
   "mcpServers": {

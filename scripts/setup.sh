@@ -200,36 +200,48 @@ fi
 log_step "Step 5/9: Building Rust workspace"
 
 CARGO_BIN=$(su - "$REAL_USER" -c 'which cargo')
+if [ -z "$CARGO_BIN" ]; then
+    log_error "cargo not found for user $REAL_USER"
+    exit 1
+fi
 
 log_info "Building server and all crates..."
-su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && cargo build 2>&1" | tail -5
+su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build 2>&1" | tail -5
 log_ok "Workspace built"
 
 log_info "Building executor (stdio mode, static musl)..."
-su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl 2>&1" | tail -3
+su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build -p sandcastle-executor --target x86_64-unknown-linux-musl 2>&1" | tail -3
 log_ok "Executor (stdio) built"
+
+# Copy stdio executor immediately so it doesn't get overwritten by vsock build
+STDIO_EXECUTOR="$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor"
 
 if [ "$HAS_KVM" = true ]; then
     log_info "Building executor (vsock mode, static musl)..."
-    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode 2>&1" | tail -3
+    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode 2>&1" | tail -3
     log_ok "Executor (vsock) built"
+    # Save vsock executor separately before rebuilding stdio
+    VSOCK_EXECUTOR=$(mktemp)
+    cp "$STDIO_EXECUTOR" "$VSOCK_EXECUTOR"
+    # Rebuild stdio so the canonical path has the correct binary
+    log_info "Rebuilding executor (stdio mode) to restore canonical path..."
+    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && '$CARGO_BIN' build -p sandcastle-executor --target x86_64-unknown-linux-musl 2>&1" | tail -3
 fi
 
 # --- Step 6: Create directory structure ---
 log_step "Step 6/9: Creating runtime directories"
 
 mkdir -p "$SANDCASTLE_DATA"/{rootfs,bundles,workspaces,bin}
-mkdir -p "$SANDCASTLE_DATA"/gvisor/{bundles,workspaces}
+mkdir -p "$SANDCASTLE_DATA"/{gvisor-bundles,gvisor-workspaces}
 mkdir -p "$SANDCASTLE_RUN"
-mkdir -p "$SANDCASTLE_RUN/gvisor"
+mkdir -p "$SANDCASTLE_RUN"/{gvisor,firecracker}
 
 if [ "$HAS_KVM" = true ]; then
     mkdir -p "$SANDCASTLE_DATA"/firecracker/workspaces
 fi
 
-# Copy executor to canonical location
-cp "$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor" \
-   "$SANDCASTLE_DATA/bin/executor"
+# Copy stdio executor to canonical location (always the stdio build at this point)
+cp "$STDIO_EXECUTOR" "$SANDCASTLE_DATA/bin/executor"
 chmod 755 "$SANDCASTLE_DATA/bin/executor"
 
 log_ok "Directory structure created"
@@ -249,7 +261,7 @@ if ! docker info &>/dev/null; then
 fi
 
 "$SANDCASTLE_ROOT/scripts/build-rootfs.sh" "$SANDCASTLE_DATA/rootfs" \
-    "$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor"
+    "$STDIO_EXECUTOR"
 
 log_ok "Container rootfs images ready"
 
@@ -257,25 +269,17 @@ log_ok "Container rootfs images ready"
 log_step "Step 8/9: Building Firecracker ext4 rootfs images"
 
 if [ "$HAS_KVM" = true ]; then
-    # For ext4 images, we need the vsock-enabled executor
-    VSOCK_EXECUTOR="$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor"
+    FC_ROOTFS_SCRIPT="$SANDCASTLE_ROOT/scripts/build-fc-rootfs.sh"
 
-    # Rebuild with vsock features for ext4 images
-    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl --features vsock-mode 2>&1" | tail -3
+    if [ ! -x "$FC_ROOTFS_SCRIPT" ]; then
+        log_warn "Skipping Firecracker rootfs: missing or non-executable script: $FC_ROOTFS_SCRIPT"
+    else
+        "$FC_ROOTFS_SCRIPT" "$SANDCASTLE_DATA/rootfs" "$VSOCK_EXECUTOR"
+        log_ok "Firecracker ext4 rootfs images ready"
+    fi
 
-    "$SANDCASTLE_ROOT/scripts/build-fc-rootfs.sh" "$SANDCASTLE_DATA/rootfs" "$VSOCK_EXECUTOR"
-
-    # Rebuild without vsock features so the stdio executor is back for containers
-    su - "$REAL_USER" -c "cd '$SANDCASTLE_ROOT/service' && cargo build -p sandcastle-executor --target x86_64-unknown-linux-musl 2>&1" | tail -3
-    # Re-copy stdio executor to rootfs dirs
-    for lang in python bash javascript; do
-        if [ -d "$SANDCASTLE_DATA/rootfs/$lang/sandbox" ]; then
-            cp "$SANDCASTLE_ROOT/service/target/x86_64-unknown-linux-musl/debug/sandcastle-executor" \
-               "$SANDCASTLE_DATA/rootfs/$lang/sandbox/executor"
-        fi
-    done
-
-    log_ok "Firecracker ext4 rootfs images ready"
+    # Clean up temp vsock executor
+    rm -f "$VSOCK_EXECUTOR"
 else
     log_warn "Skipping Firecracker rootfs (no KVM)"
 fi
@@ -339,7 +343,9 @@ MCPJSON
     log_ok "MCP config created at $MCP_CONFIG"
 fi
 
-chown -R "$REAL_USER:$REAL_USER" "$MCP_CONFIG_DIR"
+# Only chown the specific files we created/modified (avoid symlink traversal)
+chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG_DIR"
+chown "$REAL_USER:$REAL_USER" "$MCP_CONFIG"
 
 # --- Summary ---
 log_step "Setup Complete!"
@@ -351,7 +357,7 @@ echo "  Installed backends:"
 echo "    ✅ Low isolation    — Linux namespaces (libcontainer)"
 echo "    ✅ Medium isolation — gVisor (runsc)"
 if [ "$HAS_KVM" = true ]; then
-echo "    ✅ High isolation   — Firecracker microVM (KVM)"
+echo "    ✅ High isolation   — Firecracker microVM (installed)"
 else
 echo "    ⚠️  High isolation   — Skipped (no KVM)"
 fi
